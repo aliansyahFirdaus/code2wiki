@@ -8,6 +8,7 @@
   "dependencies": {
     "@code2wiki/analyzer": "workspace:*",
     "@code2wiki/ai": "workspace:*",
+    "@code2wiki/db": "workspace:*",
     "@code2wiki/github": "workspace:*"
   }
 }

@@ -1,0 +1,1 @@
+ALTER TYPE "public"."generation_run_status" ADD VALUE 'CLONED' BEFORE 'SCANNING';

@@ -81,6 +81,9 @@ importers:
       '@code2wiki/analyzer':
         specifier: workspace:*
         version: link:../../packages/analyzer
+      '@code2wiki/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@code2wiki/github':
         specifier: workspace:*
         version: link:../../packages/github

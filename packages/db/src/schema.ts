@@ -23,6 +23,7 @@ export const generationRunStatusEnum = pgEnum("generation_run_status", [
   "QUEUED",
   "WAITING_FOR_PAIR",
   "CLONING",
+  "CLONED",
   "SCANNING",
   "AI_GENERATING",
   "VALIDATING",
