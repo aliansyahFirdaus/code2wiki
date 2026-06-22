@@ -1,0 +1,1 @@
+ALTER TYPE "public"."generation_run_status" ADD VALUE 'FACTS_EXTRACTED' BEFORE 'AI_GENERATING';

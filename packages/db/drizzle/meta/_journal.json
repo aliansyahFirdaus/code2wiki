@@ -22,6 +22,20 @@
       "when": 1782149338518,
       "tag": "0002_public_scarlet_witch",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782150369877,
+      "tag": "0003_sad_triton",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1782150562108,
+      "tag": "0004_far_spencer_smythe",
+      "breakpoints": true
     }
   ]
 }

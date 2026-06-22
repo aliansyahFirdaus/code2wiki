@@ -99,6 +99,9 @@ importers:
       '@code2wiki/document':
         specifier: workspace:*
         version: link:../document
+      '@code2wiki/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/db: {}
 
