@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@code2wiki/ai": ["packages/ai/src"],
+      "@code2wiki/analyzer": ["packages/analyzer/src"],
+      "@code2wiki/db": ["packages/db/src"],
+      "@code2wiki/document": ["packages/document/src"],
+      "@code2wiki/github": ["packages/github/src"],
+      "@code2wiki/shared": ["packages/shared/src"]
+    }
+  }
+}

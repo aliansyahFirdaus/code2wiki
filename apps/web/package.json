@@ -1,0 +1,11 @@
+{
+  "name": "@code2wiki/web",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@code2wiki/document": "workspace:*",
+    "@code2wiki/shared": "workspace:*"
+  }
+}

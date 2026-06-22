@@ -1,0 +1,13 @@
+{
+  "name": "@code2wiki/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@code2wiki/analyzer": "workspace:*",
+    "@code2wiki/ai": "workspace:*",
+    "@code2wiki/github": "workspace:*"
+  }
+}

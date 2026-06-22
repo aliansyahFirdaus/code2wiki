@@ -1,0 +1,14 @@
+{
+  "name": "@code2wiki/document",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@code2wiki/shared": "workspace:*"
+  }
+}
