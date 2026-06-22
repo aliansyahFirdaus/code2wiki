@@ -13,6 +13,12 @@ import {
 export const repositoryRoleEnum = pgEnum("repository_role", ["FRONTEND", "BACKEND"]);
 export const tagEventTypeEnum = pgEnum("tag_event_type", ["TAG", "RELEASE"]);
 export const tagEventStatusEnum = pgEnum("tag_event_status", ["WAITING_FOR_PAIR", "PAIRED", "DUPLICATE", "IGNORED"]);
+export const githubInstallationStatusEnum = pgEnum("github_installation_status", [
+  "INSTALLED",
+  "UPDATED",
+  "REMOVED",
+  "UNKNOWN"
+]);
 export const generationRunStatusEnum = pgEnum("generation_run_status", [
   "QUEUED",
   "WAITING_FOR_PAIR",
@@ -34,6 +40,25 @@ export const workspaces = pgTable("workspaces", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
 });
+
+export const githubInstallations = pgTable(
+  "github_installations",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    githubInstallationId: text("github_installation_id").notNull(),
+    accountLogin: text("account_login"),
+    accountType: text("account_type"),
+    setupAction: text("setup_action"),
+    status: githubInstallationStatusEnum("status").notNull().default("UNKNOWN"),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    githubInstallationUnique: uniqueIndex("github_installations_installation_unique").on(table.githubInstallationId)
+  })
+);
 
 export const repositories = pgTable(
   "repositories",
@@ -73,7 +98,12 @@ export const tagEvents = pgTable(
     rawPayload: jsonb("raw_payload").notNull()
   },
   (table) => ({
-    githubDeliveryUnique: uniqueIndex("tag_events_github_delivery_unique").on(table.githubDeliveryId)
+    githubDeliveryUnique: uniqueIndex("tag_events_github_delivery_unique").on(table.githubDeliveryId),
+    repositoryTagCommitUnique: uniqueIndex("tag_events_repository_tag_commit_unique").on(
+      table.repositoryId,
+      table.tag,
+      table.commitSha
+    )
   })
 );
 

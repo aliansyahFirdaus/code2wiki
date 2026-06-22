@@ -5,7 +5,9 @@
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@code2wiki/db": "workspace:*",
     "@code2wiki/document": "workspace:*",
+    "@code2wiki/github": "workspace:*",
     "@code2wiki/shared": "workspace:*"
   }
 }

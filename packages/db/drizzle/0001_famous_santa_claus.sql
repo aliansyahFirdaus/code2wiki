@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "tag_events_repository_tag_commit_unique" ON "tag_events" USING btree ("repository_id","tag","commit_sha");

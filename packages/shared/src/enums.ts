@@ -9,3 +9,6 @@ export type ReviewState = (typeof reviewStates)[number];
 
 export const overlayTypes = ["EDIT", "HIDE", "ADD_AFTER", "ADD_CHILD"] as const;
 export type OverlayType = (typeof overlayTypes)[number];
+
+export const githubInstallationStatuses = ["INSTALLED", "UPDATED", "REMOVED", "UNKNOWN"] as const;
+export type GitHubInstallationStatus = (typeof githubInstallationStatuses)[number];
