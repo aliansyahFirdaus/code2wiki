@@ -27,6 +27,77 @@ export const productWikiBlockBaseSchema = z.object({
 export type BlockOrigin = z.infer<typeof blockOriginSchema>;
 export type ReviewState = z.infer<typeof reviewStateSchema>;
 
+type ProductWikiBlockSchema = z.ZodType<ProductWikiBlock>;
+
+export const productWikiBlockSchema: ProductWikiBlockSchema = z.lazy(() =>
+  z.discriminatedUnion("type", [
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("title"),
+        text: z.string().min(1),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("heading"),
+        level: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+        text: z.string().min(1),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("paragraph"),
+        text: z.string().min(1),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("statement"),
+        text: z.string().min(1),
+        confidence: z.number().min(0).max(1),
+        evidenceIds: z.array(z.string().min(1)),
+        lastGeneratedRunId: z.string().min(1),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("callout"),
+        tone: z.enum(["info", "warning", "success"]),
+        text: z.string().min(1),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("open_question"),
+        question: z.string().min(1),
+        reason: z.string().min(1),
+        relatedEvidenceIds: z.array(z.string().min(1)).optional(),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema
+      .extend({
+        type: z.literal("related_page"),
+        pageId: z.string().min(1),
+        title: z.string().min(1),
+        children: z.array(productWikiBlockSchema).optional()
+      }),
+    productWikiBlockBaseSchema.extend({
+      type: z.literal("divider"),
+      children: z.array(productWikiBlockSchema).optional()
+    })
+  ])
+);
+
+export const productWikiPageSchema = z.object({
+  pageKey: z.string().min(1),
+  title: z.string().min(1),
+  blocks: z.array(productWikiBlockSchema)
+});
+
+export const productWikiOutputSchema = z.object({
+  pages: z.array(productWikiPageSchema)
+});
+
 export type ProductWikiBlock =
   | TitleBlock
   | HeadingBlock
@@ -92,3 +163,6 @@ export type ProductWikiBlockTree = {
   pageKey: string;
   blocks: ProductWikiBlock[];
 };
+
+export type ProductWikiPage = z.infer<typeof productWikiPageSchema>;
+export type ProductWikiOutput = z.infer<typeof productWikiOutputSchema>;

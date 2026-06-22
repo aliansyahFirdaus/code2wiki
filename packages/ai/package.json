@@ -9,6 +9,7 @@
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@code2wiki/document": "workspace:*"
+    "@code2wiki/document": "workspace:*",
+    "zod": "^3.24.1"
   }
 }
