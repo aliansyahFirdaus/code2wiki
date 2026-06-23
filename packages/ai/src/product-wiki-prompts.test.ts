@@ -133,6 +133,22 @@ describe("product wiki prompts", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("OpenRouterProvider accepts resolved config", async () => {
+    const fetchMock = mockFetch();
+
+    await new OpenRouterProvider({
+      provider: "openrouter",
+      model: "config-model",
+      apiKey: "config-key",
+      baseUrl: "https://openrouter.example/api/v1/"
+    }).generateProductWiki(input());
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://openrouter.example/api/v1/chat/completions");
+    expect(init?.headers).toMatchObject({ Authorization: "Bearer config-key" });
+    expect(requestBody(fetchMock).model).toBe("config-model");
+  });
 });
 
 function messageText(messages: ReturnType<typeof buildProductWikiMessages>) {

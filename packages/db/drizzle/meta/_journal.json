@@ -57,6 +57,13 @@
       "when": 1782152000000,
       "tag": "0007_generation_quality_usage",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782152500000,
+      "tag": "0008_incremental_regeneration",
+      "breakpoints": true
     }
   ]
 }

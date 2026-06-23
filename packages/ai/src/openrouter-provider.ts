@@ -1,12 +1,16 @@
 import {
   StructuredOutputUnsupportedError,
   type AIProvider,
+  type AIProviderCapabilities,
+  type AIProviderConfig,
   type GenerateProductWikiResult,
   type GenerateProductWikiInput,
   type GenerateProductWikiRepairInput,
   type ProviderUsage
 } from "./provider";
 import { buildProductWikiMessages, buildProductWikiRepairMessages } from "./product-wiki-prompts";
+
+export const OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
 
 const productWikiJsonSchema = {
   type: "object",
@@ -57,16 +61,27 @@ const productWikiJsonSchema = {
 } as const;
 
 export class OpenRouterProvider implements AIProvider {
+  readonly capabilities: AIProviderCapabilities;
+
+  constructor(private readonly config?: AIProviderConfig) {
+    this.capabilities = {
+      provider: "openrouter",
+      model: config?.model ?? process.env.OPENROUTER_MODEL ?? process.env.AI_MODEL ?? OPENROUTER_DEFAULT_MODEL,
+      supportsStrictJsonSchema: true,
+      supportsUsage: true,
+      supportsRepair: true,
+      usageSource: "provider",
+      structuredOutputMode: "json_schema"
+    };
+  }
+
   async generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<GenerateProductWikiResult> {
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    const model = process.env.OPENROUTER_MODEL;
-    const baseUrl = process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
+    const apiKey = this.config?.apiKey ?? process.env.OPENROUTER_API_KEY;
+    const model = this.config?.model ?? process.env.OPENROUTER_MODEL ?? process.env.AI_MODEL ?? OPENROUTER_DEFAULT_MODEL;
+    const baseUrl = this.config?.baseUrl ?? process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
 
     if (!apiKey) {
       throw new Error("OPENROUTER_API_KEY is required.");
-    }
-    if (!model) {
-      throw new Error("OPENROUTER_MODEL is required.");
     }
 
     const messages = repair

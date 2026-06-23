@@ -4,8 +4,9 @@ import { buildRetrievalContexts, type CodeMap, type CodeSummary, type RetrievalC
 import {
   buildAiUsageCall,
   buildAiUsageReport,
-  OpenRouterProvider,
+  createAIProvider,
   ProductWikiValidationError,
+  resolveAIProviderConfig,
   StructuredOutputUnsupportedError,
   validateQuality,
   type AiUsageCall,
@@ -13,13 +14,23 @@ import {
   validateProductWikiOutput,
   type GenerateProductWikiEvidence,
   type GenerateProductWikiFact,
-  type ProviderUsage,
   type QualityReport,
   type ProductWikiPageGroup
 } from "@code2wiki/ai";
 import { codeFacts, codeMaps, codeSummaries, evidence, generationRuns, getDb, wikiBlocks, wikiPages } from "@code2wiki/db";
 import type { ProductWikiBlock, ProductWikiOutput } from "@code2wiki/document";
 import { and, asc, eq, inArray, or } from "drizzle-orm";
+import {
+  blockStableKeys,
+  buildEvidenceRemap,
+  buildIncrementalReport,
+  buildPageInput,
+  buildPreviousPage,
+  type IncrementalPageMeta,
+  type IncrementalReport,
+  pageInputHashVersion,
+  remapReusedPage
+} from "./incremental-wiki";
 
 type GenerateWikiResult =
   | { status: "skipped"; reason: string }
@@ -28,6 +39,12 @@ type GenerateWikiResult =
   | { status: "failed"; generationRunId: string; errorMessage: string };
 
 type ClaimedGenerationRun = typeof generationRuns.$inferSelect;
+type ReusePlan = {
+  baselineGenerationRunId: string | null;
+  affectedPageKeys: string[];
+  reusedPages: Array<{ page: ProductWikiOutput["pages"][number]; stableKeys: string[] }>;
+  reuseMissReasons: Record<string, string>;
+};
 
 export async function generateWiki(generationRunId?: string): Promise<GenerateWikiResult> {
   const db = getDb();
@@ -42,6 +59,7 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
 
   let pageGroups: ProductWikiPageGroup[] = [];
   const usageCalls: AiUsageCall[] = [];
+  let incrementalReport: IncrementalReport | undefined;
 
   try {
     const [factRows, evidenceRows, codeMapRows, summaryRows] = await Promise.all([
@@ -65,58 +83,160 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
     pageGroups = fitPageGroupsForDemo(retrieval.usedFallback ? fallbackPageGroups : pageGroupsFromRetrievalContexts(retrieval.contexts, evidenceRows));
 
     if (pageGroups.length === 0) {
-      await markInvalid(run.id, "NO_FACTS_FOR_GENERATION", invalidOutputQualityReport(), buildAiUsageReport([]));
+      incrementalReport = buildIncrementalReport({
+        baselineGenerationRunId: null,
+        affectedPageKeys: [],
+        reusedPageKeys: [],
+        reuseMissReasons: { __run: `no_page_inputs_${pageInputHashVersion}` }
+      });
+      await markInvalid(run.id, "NO_FACTS_FOR_GENERATION", invalidOutputQualityReport(), buildAiUsageReport([]), incrementalReport);
       return { status: "invalid", generationRunId: run.id, errorMessage: "NO_FACTS_FOR_GENERATION" };
     }
 
-    const provider = new OpenRouterProvider();
-    let generationResult = await provider.generateProductWiki({ generationRunId: run.id, pageGroups });
-    usageCalls.push(buildAiUsageCall("generation", generationResult.usage));
-    let rawOutput = generationResult.output;
-
+    const providerConfig = resolveAIProviderConfig();
     await db.update(generationRuns).set({ status: "VALIDATING", errorMessage: null }).where(eq(generationRuns.id, run.id));
 
     const allowedPageKeys = pageGroups.map((group) => group.pageKey);
     const validEvidenceIds = evidenceRows.map((row) => row.id);
-    let output: ReturnType<typeof validateProductWikiOutput>;
+    const pageInputByKey = new Map(
+      pageGroups.map((pageGroup) => [
+        pageGroup.pageKey,
+        buildPageInput({
+          pageGroup,
+          retrievalMode: retrieval.usedFallback ? "fallback" : "context",
+          context: retrieval.contexts.find((context) => context.pageKey === pageGroup.pageKey),
+          evidenceById: new Map(evidenceRows.map((row) => [row.id, row]))
+        })
+      ])
+    );
+    const reusePlan = await buildReusePlan({
+      run,
+      pageGroups,
+      pageInputByKey,
+      currentEvidence: evidenceRows
+    });
+    const affectedPageKeys = new Set(reusePlan.affectedPageKeys);
+    const reusedPages: ProductWikiOutput["pages"] = [];
+    const reusedPageKeys = new Set<string>();
+    const reuseMissReasons = { ...reusePlan.reuseMissReasons };
 
+    for (const candidate of reusePlan.reusedPages) {
+      try {
+        const validated = validateProductWikiOutput({
+          generationRunId: run.id,
+          allowedPageKeys: [candidate.page.pageKey],
+          validEvidenceIds,
+          output: { pages: [candidate.page] }
+        }).pages[0];
+        if (blockStableKeys(validated).join("|") !== candidate.stableKeys.join("|")) {
+          affectedPageKeys.add(candidate.page.pageKey);
+          reuseMissReasons[candidate.page.pageKey] = "stable_key_changed";
+          continue;
+        }
+        reusedPages.push(validated);
+        reusedPageKeys.add(candidate.page.pageKey);
+      } catch {
+        affectedPageKeys.add(candidate.page.pageKey);
+        reuseMissReasons[candidate.page.pageKey] = "reused_page_validation_failed";
+      }
+    }
+
+    const affectedPageGroups = pageGroups.filter((group) => affectedPageKeys.has(group.pageKey));
+    let generatedPages: ProductWikiOutput["pages"] = [];
+    incrementalReport = buildIncrementalReport({
+      baselineGenerationRunId: reusePlan.baselineGenerationRunId,
+      affectedPageKeys: [...affectedPageKeys],
+      reusedPageKeys: [...reusedPageKeys],
+      reuseMissReasons
+    });
+
+    if (affectedPageGroups.length > 0) {
+      const provider = createAIProvider(providerConfig);
+      let generationResult = await provider.generateProductWiki({ generationRunId: run.id, pageGroups: affectedPageGroups });
+      usageCalls.push(buildAiUsageCall("generation", generationResult.usage));
+      let rawOutput = generationResult.output;
+
+      try {
+        generatedPages = validateProductWikiOutput({
+          generationRunId: run.id,
+          allowedPageKeys: affectedPageGroups.map((group) => group.pageKey),
+          validEvidenceIds,
+          output: rawOutput
+        }).pages;
+      } catch (error) {
+        if (!(error instanceof ProductWikiValidationError)) {
+          throw error;
+        }
+
+        generationResult = await provider.generateProductWiki(
+          { generationRunId: run.id, pageGroups: affectedPageGroups },
+          {
+            invalidOutput: rawOutput,
+            validationErrors: error.validationErrors
+          }
+        );
+        usageCalls.push(buildAiUsageCall("repair", generationResult.usage));
+        rawOutput = generationResult.output;
+
+        try {
+          generatedPages = validateProductWikiOutput({
+            generationRunId: run.id,
+            allowedPageKeys: affectedPageGroups.map((group) => group.pageKey),
+            validEvidenceIds,
+            output: rawOutput
+          }).pages;
+        } catch (repairError) {
+          const errorMessage =
+            repairError instanceof ProductWikiValidationError
+              ? sanitizeErrorMessage(repairError.message)
+              : sanitizeErrorMessage(repairError);
+          incrementalReport = buildIncrementalReport({
+            baselineGenerationRunId: reusePlan.baselineGenerationRunId,
+            affectedPageKeys: [...affectedPageKeys],
+            reusedPageKeys: [...reusedPageKeys],
+            reuseMissReasons
+          });
+          await markInvalid(run.id, errorMessage, invalidOutputQualityReport(), buildAiUsageReport(usageCalls), incrementalReport);
+          return { status: "invalid", generationRunId: run.id, errorMessage };
+        }
+      }
+    }
+
+    const finalPages = pageGroups
+      .map((group) => generatedPages.find((page) => page.pageKey === group.pageKey) ?? reusedPages.find((page) => page.pageKey === group.pageKey))
+      .filter(isDefined);
+    let output: ReturnType<typeof validateProductWikiOutput>;
     try {
       output = validateProductWikiOutput({
         generationRunId: run.id,
         allowedPageKeys,
         validEvidenceIds,
-        output: rawOutput
+        output: { pages: finalPages }
       });
     } catch (error) {
       if (!(error instanceof ProductWikiValidationError)) {
         throw error;
       }
-
-      generationResult = await provider.generateProductWiki(
-        { generationRunId: run.id, pageGroups },
-        {
-          invalidOutput: rawOutput,
-          validationErrors: error.validationErrors
-        }
-      );
-      usageCalls.push(buildAiUsageCall("repair", generationResult.usage));
-      rawOutput = generationResult.output;
-
-      try {
-        output = validateProductWikiOutput({
-          generationRunId: run.id,
-          allowedPageKeys,
-          validEvidenceIds,
-          output: rawOutput
-        });
-      } catch (repairError) {
-        const errorMessage =
-          repairError instanceof ProductWikiValidationError
-            ? sanitizeErrorMessage(repairError.message)
-            : sanitizeErrorMessage(repairError);
-        await markInvalid(run.id, errorMessage, invalidOutputQualityReport(), buildAiUsageReport(usageCalls));
-        return { status: "invalid", generationRunId: run.id, errorMessage };
-      }
+      const errorMessage = sanitizeErrorMessage(error.message);
+      incrementalReport = buildIncrementalReport({
+        baselineGenerationRunId: reusePlan.baselineGenerationRunId,
+        affectedPageKeys: [...affectedPageKeys],
+        reusedPageKeys: [...reusedPageKeys],
+        reuseMissReasons
+      });
+      await markInvalid(run.id, errorMessage, invalidOutputQualityReport(), buildAiUsageReport(usageCalls), incrementalReport);
+      return { status: "invalid", generationRunId: run.id, errorMessage };
+    }
+    if (output.pages.length !== pageGroups.length) {
+      const errorMessage = "AI output did not include full current page set.";
+      incrementalReport = buildIncrementalReport({
+        baselineGenerationRunId: reusePlan.baselineGenerationRunId,
+        affectedPageKeys: [...affectedPageKeys],
+        reusedPageKeys: [...reusedPageKeys],
+        reuseMissReasons
+      });
+      await markInvalid(run.id, errorMessage, invalidOutputQualityReport(), buildAiUsageReport(usageCalls), incrementalReport);
+      return { status: "invalid", generationRunId: run.id, errorMessage };
     }
 
     const qualityReport = validateQuality({
@@ -130,13 +250,31 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
       output
     });
     const aiUsageReport = buildAiUsageReport(usageCalls);
+    incrementalReport = buildIncrementalReport({
+      baselineGenerationRunId: reusePlan.baselineGenerationRunId,
+      affectedPageKeys: [...affectedPageKeys],
+      reusedPageKeys: [...reusedPageKeys],
+      reuseMissReasons
+    });
 
     if (qualityReport.gateResult === "FAIL") {
-      await markInvalid(run.id, "QUALITY_GATE_FAILED", qualityReport, aiUsageReport);
+      await markInvalid(run.id, "QUALITY_GATE_FAILED", qualityReport, aiUsageReport, incrementalReport);
       return { status: "invalid", generationRunId: run.id, errorMessage: "QUALITY_GATE_FAILED" };
     }
 
-    await persistWikiOutput(run, output, qualityReport, aiUsageReport);
+    const pageMeta = new Map(
+      pageGroups.map((group) => [
+        group.pageKey,
+        {
+          pageKey: group.pageKey,
+          inputHash: pageInputByKey.get(group.pageKey)?.inputHash ?? "",
+          generationStrategy: reusedPageKeys.has(group.pageKey) ? ("REUSED" as const) : ("GENERATED" as const),
+          reusedFromGenerationRunId: reusedPageKeys.has(group.pageKey) ? reusePlan.baselineGenerationRunId : null
+        }
+      ])
+    );
+
+    await persistWikiOutput(run, output, qualityReport, aiUsageReport, incrementalReport, pageMeta);
 
     return {
       status: "completed",
@@ -145,17 +283,15 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
       generatedStatementWithEvidenceCount: output.generatedStatementWithEvidenceCount
     };
   } catch (error) {
-    const aiUsageReport = buildAiUsageReport(
-      usageCalls.length > 0 ? usageCalls : [buildAiUsageCall("generation", estimatedProviderUsage(run.id, pageGroups))]
-    );
+    const aiUsageReport = buildAiUsageReport(usageCalls);
     const qualityReport = invalidOutputQualityReport();
     if (error instanceof StructuredOutputUnsupportedError) {
-      await markFailed(run.id, "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT", qualityReport, aiUsageReport);
+      await markFailed(run.id, "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT", qualityReport, aiUsageReport, incrementalReport);
       return { status: "failed", generationRunId: run.id, errorMessage: "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT" };
     }
 
     const errorMessage = sanitizeErrorMessage(error);
-    await markFailed(run.id, errorMessage, qualityReport, aiUsageReport);
+    await markFailed(run.id, errorMessage, qualityReport, aiUsageReport, incrementalReport);
     return { status: "failed", generationRunId: run.id, errorMessage };
   }
 }
@@ -192,6 +328,107 @@ async function claimGenerationRun(generationRunId?: string): Promise<ClaimedGene
 
     return run ?? null;
   });
+}
+
+async function buildReusePlan(input: {
+  run: ClaimedGenerationRun;
+  pageGroups: ProductWikiPageGroup[];
+  pageInputByKey: Map<string, { pageKey: string; inputHash: string }>;
+  currentEvidence: Array<typeof evidence.$inferSelect>;
+}): Promise<ReusePlan> {
+  const db = getDb();
+  const fullGeneration = (reason: string): ReusePlan => ({
+    baselineGenerationRunId: null,
+    affectedPageKeys: input.pageGroups.map((group) => group.pageKey),
+    reusedPages: [],
+    reuseMissReasons: Object.fromEntries(input.pageGroups.map((group) => [group.pageKey, reason]))
+  });
+  const candidateRuns = await db
+    .select()
+    .from(generationRuns)
+    .where(
+      and(
+        eq(generationRuns.workspaceId, input.run.workspaceId),
+        eq(generationRuns.frontendRepositoryId, input.run.frontendRepositoryId),
+        eq(generationRuns.backendRepositoryId, input.run.backendRepositoryId),
+        eq(generationRuns.status, "COMPLETED")
+      )
+    );
+  const baselineRun = [...candidateRuns]
+    .filter((candidate) => candidate.id !== input.run.id && candidate.createdAt < input.run.createdAt)
+    .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+  if (!baselineRun) {
+    return fullGeneration("no_safe_baseline");
+  }
+
+  const qualityGate = qualityGateResult(baselineRun.qualityReportJson);
+  if (qualityGate !== null && qualityGate !== "PASS" && qualityGate !== "WARN") {
+    return fullGeneration("baseline_quality_gate_not_safe");
+  }
+
+  const baselinePages = await db.select().from(wikiPages).where(eq(wikiPages.generationRunId, baselineRun.id));
+  if (baselinePages.length === 0 || baselinePages.some((page) => !page.inputHash)) {
+    return fullGeneration("baseline_pages_missing_input_hash");
+  }
+
+  const baselineBlocks = await db.select().from(wikiBlocks).where(inArray(wikiBlocks.pageId, baselinePages.map((page) => page.id)));
+  if (baselineBlocks.length === 0) {
+    return fullGeneration("baseline_blocks_missing");
+  }
+
+  const previousEvidence = await db.select().from(evidence).where(eq(evidence.generationRunId, baselineRun.id));
+  const remap = buildEvidenceRemap({ previousEvidence, currentEvidence: input.currentEvidence });
+  const affectedPageKeys = new Set<string>();
+  const reusedPages: ReusePlan["reusedPages"] = [];
+  const reuseMissReasons: Record<string, string> = {};
+  const baselinePageByKey = new Map(baselinePages.map((page) => [page.pageKey, page]));
+
+  for (const pageGroup of input.pageGroups) {
+    const currentInput = input.pageInputByKey.get(pageGroup.pageKey);
+    const baselinePage = baselinePageByKey.get(pageGroup.pageKey);
+    if (!baselinePage) {
+      affectedPageKeys.add(pageGroup.pageKey);
+      reuseMissReasons[pageGroup.pageKey] = "baseline_page_missing";
+      continue;
+    }
+    if (!currentInput || baselinePage.inputHash !== currentInput.inputHash) {
+      affectedPageKeys.add(pageGroup.pageKey);
+      reuseMissReasons[pageGroup.pageKey] = "input_hash_mismatch";
+      continue;
+    }
+    if (!remap.ok) {
+      affectedPageKeys.add(pageGroup.pageKey);
+      reuseMissReasons[pageGroup.pageKey] = remap.reason;
+      continue;
+    }
+
+    const pageBlocks = baselineBlocks.filter((block) => block.pageId === baselinePage.id);
+    if (pageBlocks.length === 0) {
+      affectedPageKeys.add(pageGroup.pageKey);
+      reuseMissReasons[pageGroup.pageKey] = "baseline_page_blocks_missing";
+      continue;
+    }
+
+    const previousPage = buildPreviousPage(baselinePage, pageBlocks);
+    const remappedPage = remapReusedPage({
+      generationRunId: input.run.id,
+      page: previousPage,
+      evidenceIdMap: remap.idMap
+    });
+    if (!remappedPage.ok) {
+      affectedPageKeys.add(pageGroup.pageKey);
+      reuseMissReasons[pageGroup.pageKey] = remappedPage.reason;
+      continue;
+    }
+    reusedPages.push({ page: remappedPage.page, stableKeys: blockStableKeys(previousPage) });
+  }
+
+  return {
+    baselineGenerationRunId: baselineRun.id,
+    affectedPageKeys: [...affectedPageKeys],
+    reusedPages,
+    reuseMissReasons
+  };
 }
 
 function buildPageGroups(
@@ -337,7 +574,7 @@ function confidenceScore(confidence: string) {
 async function persistWikiOutput(run: ClaimedGenerationRun, output: ProductWikiOutput & {
   generatedStatementCount: number;
   generatedStatementWithEvidenceCount: number;
-}, qualityReport: QualityReport, aiUsageReport: AiUsageReport) {
+}, qualityReport: QualityReport, aiUsageReport: AiUsageReport, incrementalReport: IncrementalReport, pageMeta: Map<string, IncrementalPageMeta>) {
   const db = getDb();
   const pageRows = output.pages.map((page) => ({
     id: pageId(run.workspaceId, page.pageKey),
@@ -346,6 +583,9 @@ async function persistWikiOutput(run: ClaimedGenerationRun, output: ProductWikiO
     pageKey: page.pageKey,
     title: page.title,
     slug: page.pageKey.replace(/\./g, "/"),
+    inputHash: pageMeta.get(page.pageKey)?.inputHash ?? null,
+    generationStrategy: pageMeta.get(page.pageKey)?.generationStrategy ?? null,
+    reusedFromGenerationRunId: pageMeta.get(page.pageKey)?.reusedFromGenerationRunId ?? null,
     parentPageId: null
   }));
   const pageKeys = pageRows.map((page) => page.pageKey);
@@ -389,6 +629,7 @@ async function persistWikiOutput(run: ClaimedGenerationRun, output: ProductWikiO
         generatedStatementWithEvidenceCount: output.generatedStatementWithEvidenceCount,
         qualityReportJson: qualityReport,
         aiUsageJson: aiUsageReport,
+        incrementalReportJson: incrementalReport,
         status: "COMPLETED",
         errorMessage: null,
         finishedAt: new Date()
@@ -483,7 +724,7 @@ function compareFacts(left: typeof codeFacts.$inferSelect, right: typeof codeFac
   );
 }
 
-async function markInvalid(generationRunId: string, errorMessage: string, qualityReport?: QualityReport, aiUsageReport?: AiUsageReport) {
+async function markInvalid(generationRunId: string, errorMessage: string, qualityReport?: QualityReport, aiUsageReport?: AiUsageReport, incrementalReport?: IncrementalReport) {
   const db = getDb();
   await db
     .update(generationRuns)
@@ -492,12 +733,13 @@ async function markInvalid(generationRunId: string, errorMessage: string, qualit
       errorMessage: sanitizeErrorMessage(errorMessage),
       qualityReportJson: qualityReport,
       aiUsageJson: aiUsageReport,
+      incrementalReportJson: incrementalReport,
       finishedAt: new Date()
     })
     .where(eq(generationRuns.id, generationRunId));
 }
 
-async function markFailed(generationRunId: string, errorMessage: string, qualityReport?: QualityReport, aiUsageReport?: AiUsageReport) {
+async function markFailed(generationRunId: string, errorMessage: string, qualityReport?: QualityReport, aiUsageReport?: AiUsageReport, incrementalReport?: IncrementalReport) {
   const db = getDb();
   await db
     .update(generationRuns)
@@ -506,6 +748,7 @@ async function markFailed(generationRunId: string, errorMessage: string, quality
       errorMessage: sanitizeErrorMessage(errorMessage),
       qualityReportJson: qualityReport,
       aiUsageJson: aiUsageReport,
+      incrementalReportJson: incrementalReport,
       finishedAt: new Date()
     })
     .where(eq(generationRuns.id, generationRunId));
@@ -515,18 +758,11 @@ function invalidOutputQualityReport(): QualityReport {
   return validateQuality({ generationRunId: "", allowedPageKeys: [], evidence: [], output: null });
 }
 
-function estimatedProviderUsage(generationRunId: string, pageGroups: ProductWikiPageGroup[]): ProviderUsage {
-  const inputCharCount = JSON.stringify({ generationRunId, pageGroups }).length;
-  return {
-    provider: "openrouter",
-    model: process.env.OPENROUTER_MODEL ?? "unknown",
-    promptTokenEstimate: Math.ceil(inputCharCount / 4),
-    promptTokens: null,
-    completionTokens: null,
-    totalTokens: null,
-    inputCharCount,
-    outputCharCount: 0
-  };
+function qualityGateResult(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("gateResult" in value)) {
+    return null;
+  }
+  return value.gateResult === "PASS" || value.gateResult === "WARN" || value.gateResult === "FAIL" ? value.gateResult : null;
 }
 
 function sanitizeErrorMessage(error: unknown) {

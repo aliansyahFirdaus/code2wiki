@@ -52,14 +52,41 @@ export type ProviderUsage = {
   outputCharCount: number;
 };
 
+export type SupportedAIProvider = "openrouter";
+
+export type AIProviderCapabilities = {
+  provider: SupportedAIProvider;
+  model: string;
+  supportsStrictJsonSchema: boolean;
+  supportsUsage: boolean;
+  supportsRepair: boolean;
+  usageSource: "provider";
+  structuredOutputMode: "json_schema";
+};
+
+export type AIProviderConfig = {
+  provider: SupportedAIProvider;
+  model: string;
+  apiKey?: string;
+  baseUrl?: string;
+};
+
 export type GenerateProductWikiResult = {
   output: unknown;
   usage: ProviderUsage;
 };
 
 export type AIProvider = {
+  capabilities?: AIProviderCapabilities;
   generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<GenerateProductWikiResult>;
 };
+
+export class ProviderConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderConfigurationError";
+  }
+}
 
 export class StructuredOutputUnsupportedError extends Error {
   constructor(message = "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT") {

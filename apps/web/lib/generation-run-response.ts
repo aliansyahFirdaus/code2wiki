@@ -23,6 +23,7 @@ export function toGenerationRunResponse(run: typeof generationRuns.$inferSelect,
     qualityGateResult: qualityGateResult(run.qualityReportJson),
     qualityIssueCounts: qualityIssueCounts(run.qualityReportJson),
     aiUsageSummary: aiUsageSummary(run.aiUsageJson),
+    incrementalSummary: incrementalSummary(run.incrementalReportJson),
     errorMessage: run.errorMessage ? sanitizeErrorText(run.errorMessage) : null,
     startedAt: run.startedAt?.toISOString() ?? null,
     finishedAt: run.finishedAt?.toISOString() ?? null,
@@ -68,10 +69,28 @@ function aiUsageSummary(value: unknown) {
   };
 }
 
+function incrementalSummary(value: unknown) {
+  if (!isRecord(value)) return null;
+  return {
+    mode: typeof value.mode === "string" ? value.mode : null,
+    baselineGenerationRunId: typeof value.baselineGenerationRunId === "string" ? value.baselineGenerationRunId : null,
+    generatedPageCount: numberOrNull(value.generatedPageCount),
+    reusedPageCount: numberOrNull(value.reusedPageCount),
+    affectedPageKeys: stringArray(value.affectedPageKeys),
+    reusedPageKeys: stringArray(value.reusedPageKeys),
+    aiRequestCountSavedEstimate: numberOrNull(value.aiRequestCountSavedEstimate),
+    pageInputHashVersion: typeof value.pageInputHashVersion === "string" ? value.pageInputHashVersion : null
+  };
+}
+
 function numberOrNull(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }

@@ -132,6 +132,7 @@ export const generationRuns = pgTable(
     generatedStatementWithEvidenceCount: integer("generated_statement_with_evidence_count").notNull().default(0),
     qualityReportJson: jsonb("quality_report_json").$type<Record<string, unknown> | null>(),
     aiUsageJson: jsonb("ai_usage_json").$type<Record<string, unknown> | null>(),
+    incrementalReportJson: jsonb("incremental_report_json").$type<Record<string, unknown> | null>(),
     errorMessage: text("error_message"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -224,6 +225,9 @@ export const wikiPages = pgTable(
     pageKey: text("page_key").notNull(),
     title: text("title").notNull(),
     slug: text("slug").notNull(),
+    inputHash: text("input_hash"),
+    generationStrategy: text("generation_strategy"),
+    reusedFromGenerationRunId: text("reused_from_generation_run_id"),
     parentPageId: text("parent_page_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()

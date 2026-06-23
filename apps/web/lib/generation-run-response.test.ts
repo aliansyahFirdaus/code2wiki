@@ -25,6 +25,7 @@ describe("toGenerationRunResponse", () => {
         generatedStatementWithEvidenceCount: 2,
         qualityReportJson: null,
         aiUsageJson: null,
+        incrementalReportJson: null,
         errorMessage: null,
         startedAt: null,
         finishedAt: null,
@@ -78,6 +79,18 @@ describe("toGenerationRunResponse", () => {
             pricingSource: "env"
           }
         },
+        incrementalReportJson: {
+          version: 1,
+          baselineGenerationRunId: "run-old",
+          mode: "PARTIAL",
+          generatedPageCount: 1,
+          reusedPageCount: 2,
+          affectedPageKeys: ["crew.add"],
+          reusedPageKeys: ["crew.list", "crew.detail"],
+          reuseMissReasons: { "crew.add": "input_hash_mismatch" },
+          aiRequestCountSavedEstimate: 0,
+          pageInputHashVersion: "page-input-v1"
+        },
         errorMessage: null,
         startedAt: null,
         finishedAt: null,
@@ -96,7 +109,18 @@ describe("toGenerationRunResponse", () => {
       estimatedCostUsdMicros: 42,
       pricingSource: "env"
     });
+    expect(response.incrementalSummary).toEqual({
+      mode: "PARTIAL",
+      baselineGenerationRunId: "run-old",
+      generatedPageCount: 1,
+      reusedPageCount: 2,
+      affectedPageKeys: ["crew.add"],
+      reusedPageKeys: ["crew.list", "crew.detail"],
+      aiRequestCountSavedEstimate: 0,
+      pageInputHashVersion: "page-input-v1"
+    });
     expect(response).not.toHaveProperty("qualityReportJson");
     expect(response).not.toHaveProperty("aiUsageJson");
+    expect(response).not.toHaveProperty("incrementalReportJson");
   });
 });

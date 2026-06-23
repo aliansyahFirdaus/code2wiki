@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { generateWiki } from "./generate-wiki";
+import { buildPageInput } from "./incremental-wiki";
 
 const mocks = vi.hoisted(() => ({
   ProductWikiValidationError: class ProductWikiValidationError extends Error {
@@ -12,9 +13,17 @@ const mocks = vi.hoisted(() => ({
       this.validationErrors = validationErrors;
     }
   },
+  ProviderConfigurationError: class ProviderConfigurationError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "ProviderConfigurationError";
+    }
+  },
   buildRetrievalContexts: vi.fn(),
+  createAIProvider: vi.fn(),
   generateProductWiki: vi.fn(),
   getDb: vi.fn(),
+  resolveAIProviderConfig: vi.fn(),
   codeFacts: { generationRunId: "code_facts.generation_run_id" },
   codeMaps: { generationRunId: "code_maps.generation_run_id" },
   codeSummaries: { generationRunId: "code_summaries.generation_run_id" },
@@ -77,8 +86,10 @@ vi.mock("@code2wiki/ai", () => ({
       pricingSource: null
     }
   })),
-  OpenRouterProvider: vi.fn(() => ({ generateProductWiki: mocks.generateProductWiki })),
+  createAIProvider: mocks.createAIProvider,
   ProductWikiValidationError: mocks.ProductWikiValidationError,
+  ProviderConfigurationError: mocks.ProviderConfigurationError,
+  resolveAIProviderConfig: mocks.resolveAIProviderConfig,
   StructuredOutputUnsupportedError: class StructuredOutputUnsupportedError extends Error {},
   validateQuality: vi.fn((input: { output: { pages?: Array<{ blocks: Array<{ text?: string }> }> } | null }) => {
     const text = input.output?.pages?.flatMap((page) => page.blocks).map((block) => block.text ?? "").join("\n") ?? "";
@@ -106,7 +117,7 @@ vi.mock("@code2wiki/ai", () => ({
         ...page,
         blocks: page.blocks.map((block, index) => ({
           id: `blk-${index}`,
-          stableKey: `${page.pageKey}.${index}`,
+          stableKey: `${page.pageKey}.${index}.${slugify(block.text ?? block.type)}`,
           origin: "CODE",
           reviewState: "VERIFIED",
           sourceHash: "source",
@@ -127,6 +138,8 @@ describe("generateWiki trust fallback handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.buildRetrievalContexts.mockReturnValue({ usedFallback: true, retrievalWarnings: [], contexts: [] });
+    mocks.resolveAIProviderConfig.mockReturnValue({ provider: "openrouter", model: "test-model", apiKey: "test-key" });
+    mocks.createAIProvider.mockReturnValue({ generateProductWiki: mocks.generateProductWiki });
   });
 
   it("sets AI_OUTPUT_INVALID and inserts no wiki pages or blocks when repair output remains invalid", async () => {
@@ -237,9 +250,134 @@ describe("generateWiki trust fallback handling", () => {
 
     expect(statusUpdates(db, "COMPLETED")[0].qualityReportJson.gateResult).toBe("WARN");
   });
+
+  it("falls back to full generation when baseline row has no current wiki pages", async () => {
+    const db = makeDb({ baseline: "missingPages" });
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput()));
+
+    await generateWiki("run-1");
+
+    expect(mocks.generateProductWiki).toHaveBeenCalledTimes(1);
+    expect(statusUpdates(db, "COMPLETED")[0].incrementalReportJson).toMatchObject({
+      mode: "FULL",
+      reusedPageCount: 0,
+      generatedPageCount: 1
+    });
+  });
+
+  it("falls back to full generation when baseline page input_hash is null", async () => {
+    const db = makeDb({ baseline: "nullHash" });
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput()));
+
+    await generateWiki("run-1");
+
+    expect(mocks.generateProductWiki).toHaveBeenCalledTimes(1);
+    expect(statusUpdates(db, "COMPLETED")[0].incrementalReportJson.reuseMissReasons["crew.add"]).toBe("baseline_pages_missing_input_hash");
+  });
+
+  it("reuses unchanged page with remappable evidence without calling provider", async () => {
+    const db = makeDb({ baseline: "safe" });
+    mocks.getDb.mockReturnValue(db.instance);
+
+    await expect(generateWiki("run-1")).resolves.toMatchObject({ status: "completed" });
+
+    expect(mocks.generateProductWiki).not.toHaveBeenCalled();
+    const pageInsert = db.inserts.find((insert) => insert.table === mocks.wikiPages);
+    const blockInsert = db.inserts.find((insert) => insert.table === mocks.wikiBlocks);
+    expect(pageInsert?.value).toEqual(expect.arrayContaining([expect.objectContaining({
+      pageKey: "crew.add",
+      generationStrategy: "REUSED",
+      reusedFromGenerationRunId: "run-old"
+    })]));
+    expect(blockInsert?.value).toEqual(expect.arrayContaining([expect.objectContaining({ evidenceIds: ["ev-1"] })]));
+    expect(JSON.stringify(blockInsert?.value)).not.toContain("ev-old");
+    expect(statusUpdates(db, "COMPLETED")[0].aiUsageJson.summary.callCount).toBe(0);
+    expect(statusUpdates(db, "COMPLETED")[0].incrementalReportJson).toMatchObject({
+      mode: "REUSE_ONLY",
+      reusedPageKeys: ["crew.add"],
+      aiRequestCountSavedEstimate: 1
+    });
+  });
+
+  it("generates changed page when input hash differs", async () => {
+    const db = makeDb({ baseline: "changed" });
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput()));
+
+    await generateWiki("run-1");
+
+    expect(mocks.generateProductWiki).toHaveBeenCalledTimes(1);
+    const pageInsert = db.inserts.find((insert) => insert.table === mocks.wikiPages);
+    expect(pageInsert?.value).toEqual(expect.arrayContaining([expect.objectContaining({
+      pageKey: "crew.add",
+      generationStrategy: "GENERATED",
+      reusedFromGenerationRunId: null
+    })]));
+    expect(statusUpdates(db, "COMPLETED")[0].incrementalReportJson.reuseMissReasons["crew.add"]).toBe("input_hash_mismatch");
+  });
+
+  it("regenerates page when evidence remap fails or fingerprint is duplicated", async () => {
+    const remapMissingDb = makeDb({ baseline: "remapMissing" });
+    mocks.getDb.mockReturnValue(remapMissingDb.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput()));
+    await generateWiki("run-1");
+    expect(statusUpdates(remapMissingDb, "COMPLETED")[0].incrementalReportJson.reuseMissReasons["crew.add"]).toBe("missing_evidence_remap");
+
+    vi.clearAllMocks();
+    const duplicateDb = makeDb({ baseline: "duplicateCurrentEvidence" });
+    mocks.getDb.mockReturnValue(duplicateDb.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput()));
+    await generateWiki("run-1");
+    expect(statusUpdates(duplicateDb, "COMPLETED")[0].incrementalReportJson.reuseMissReasons["crew.add"]).toBe("duplicate_current_evidence_fingerprint");
+  });
+
+  it("records zero actual usage calls on provider failure before response", async () => {
+    const db = makeDb({ baseline: "changed" });
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockRejectedValueOnce(new Error("provider down"));
+
+    await generateWiki("run-1");
+
+    const update = statusUpdates(db, "FAILED")[0];
+    expect(update.aiUsageJson.summary.callCount).toBe(0);
+    expect(update.incrementalReportJson.affectedPageKeys).toEqual(["crew.add"]);
+  });
+
+  it("sets FAILED and inserts no wiki output on provider config error", async () => {
+    const db = makeDb();
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.resolveAIProviderConfig.mockImplementationOnce(() => {
+      throw new mocks.ProviderConfigurationError("Unsupported AI_PROVIDER \"anthropic\". Supported providers: openrouter.");
+    });
+
+    const result = await generateWiki("run-1");
+    const update = statusUpdates(db, "FAILED")[0];
+
+    expect(result).toMatchObject({ status: "failed", errorMessage: "Unsupported AI_PROVIDER \"anthropic\". Supported providers: openrouter." });
+    expect(update.errorMessage).toBe("Unsupported AI_PROVIDER \"anthropic\". Supported providers: openrouter.");
+    expect(db.inserts).not.toEqual(expect.arrayContaining([expect.objectContaining({ table: mocks.wikiPages })]));
+    expect(db.inserts).not.toEqual(expect.arrayContaining([expect.objectContaining({ table: mocks.wikiBlocks })]));
+    expect(mocks.createAIProvider).not.toHaveBeenCalled();
+    expect(mocks.generateProductWiki).not.toHaveBeenCalled();
+    expect(update.aiUsageJson.summary.callCount).toBe(0);
+  });
+
+  it("does not create provider or call generation for REUSE_ONLY", async () => {
+    const db = makeDb({ baseline: "safe" });
+    mocks.getDb.mockReturnValue(db.instance);
+
+    await generateWiki("run-1");
+
+    expect(mocks.resolveAIProviderConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.createAIProvider).not.toHaveBeenCalled();
+    expect(mocks.generateProductWiki).not.toHaveBeenCalled();
+    expect(statusUpdates(db, "COMPLETED")[0].aiUsageJson.summary.callCount).toBe(0);
+  });
 });
 
-function makeDb(options: { existingPages?: unknown[] } = {}) {
+function makeDb(options: { existingPages?: unknown[]; baseline?: "safe" | "missingPages" | "nullHash" | "changed" | "remapMissing" | "duplicateCurrentEvidence" } = {}) {
   const run = {
     id: "run-1",
     workspaceId: "workspace-1",
@@ -248,13 +386,14 @@ function makeDb(options: { existingPages?: unknown[] } = {}) {
     frontendTag: "fe-v1",
     frontendCommitSha: "fe-sha",
     backendTag: "be-v1",
-    backendCommitSha: "be-sha"
+    backendCommitSha: "be-sha",
+    createdAt: new Date("2026-01-02T00:00:00Z")
   };
   const facts = [
     {
       id: "fact-1",
       generationRunId: "run-1",
-      repositoryRole: "FRONTEND",
+      repositoryRole: "FRONTEND" as const,
       repositoryFullName: "acme/web",
       tag: "v1",
       commitSha: "fe-sha",
@@ -264,21 +403,80 @@ function makeDb(options: { existingPages?: unknown[] } = {}) {
       confidence: 0.95
     }
   ];
+  const currentEvidenceBase = {
+    id: "ev-1",
+    generationRunId: "run-1",
+    repositoryRole: "FRONTEND" as const,
+    repositoryFullName: "acme/web",
+    tag: "v1",
+    commitSha: "fe-sha",
+    filePath: "app/crew/add/page.tsx",
+    startLine: 1,
+    endLine: 2,
+    sourceKind: "ROUTE",
+    summary: "Crew can be added.",
+    codeSnippet: "export default function Page() {}",
+    githubUrl: "https://github.com/acme/web/blob/fe-sha/app/crew/add/page.tsx#L1-L2"
+  };
   const evidence = [
+    currentEvidenceBase,
+    ...(options.baseline === "duplicateCurrentEvidence" ? [{ ...currentEvidenceBase, id: "ev-duplicate" }] : [])
+  ];
+  const currentPageGroup = {
+    pageKey: "crew.add",
+    title: "Crew Add",
+    facts,
+    evidence: [currentEvidenceBase].map(({ codeSnippet, generationRunId, ...item }) => item)
+  };
+  const baselineInputHash = buildPageInput({
+    pageGroup: currentPageGroup,
+    retrievalMode: "fallback",
+    evidenceById: new Map([[currentEvidenceBase.id, currentEvidenceBase]])
+  }).inputHash;
+  const baselineRun = {
+    ...run,
+    id: "run-old",
+    status: "COMPLETED",
+    qualityReportJson: { gateResult: "PASS" },
+    createdAt: new Date("2026-01-01T00:00:00Z")
+  };
+  const baselinePages = options.baseline && options.baseline !== "missingPages" ? [
     {
-      id: "ev-1",
-      generationRunId: "run-1",
-      repositoryRole: "FRONTEND",
-      repositoryFullName: "acme/web",
-      tag: "v1",
-      commitSha: "fe-sha",
-      filePath: "app/crew/add/page.tsx",
-      startLine: 1,
-      endLine: 2,
-      sourceKind: "ROUTE",
-      summary: "Crew can be added.",
-      codeSnippet: "export default function Page() {}",
-      githubUrl: "https://github.com/acme/web/blob/fe-sha/app/crew/add/page.tsx#L1-L2"
+      id: "page_old",
+      workspaceId: "workspace-1",
+      generationRunId: "run-old",
+      pageKey: "crew.add",
+      title: "Crew Add",
+      slug: "crew/add",
+      inputHash: options.baseline === "nullHash" ? null : options.baseline === "changed" ? "different-hash" : baselineInputHash
+    }
+  ] : [];
+  const baselineBlocks = baselinePages.length > 0 ? [
+    {
+      id: "old-block",
+      pageId: "page_old",
+      generationRunId: "run-old",
+      parentBlockId: null,
+      position: 0,
+      stableKey: "crew.add.0.crew-can-be-added",
+      type: "statement",
+      origin: "CODE",
+      reviewState: "VERIFIED",
+      sourceHash: "old-source",
+      contentHash: "old-content",
+      evidenceIds: ["ev-old"],
+      locked: true,
+      blockJson: { type: "statement", text: "Crew can be added.", confidence: 0.95, evidenceIds: ["ev-old"], lastGeneratedRunId: "run-old" }
+    }
+  ] : [];
+  const previousEvidence = [
+    {
+      ...currentEvidenceBase,
+      id: "ev-old",
+      generationRunId: "run-old",
+      commitSha: "old-sha",
+      githubUrl: "https://github.com/acme/web/blob/old-sha/app/crew/add/page.tsx#L1-L2",
+      ...(options.baseline === "remapMissing" ? { startLine: 10, endLine: 11 } : {})
     }
   ];
   const inserts: Array<{ table: unknown; value: unknown }> = [];
@@ -286,12 +484,15 @@ function makeDb(options: { existingPages?: unknown[] } = {}) {
   const updates: unknown[] = [];
   const overlayMutations: unknown[] = [];
 
-  const selectRows = (table: unknown) => {
+  const selectRows = (table: unknown, condition?: unknown) => {
+    const conditionText = JSON.stringify(condition);
     if (table === mocks.codeFacts) return facts;
-    if (table === mocks.evidence) return evidence;
+    if (table === mocks.evidence) return conditionText.includes("run-old") ? previousEvidence : evidence;
     if (table === mocks.codeMaps) return [];
     if (table === mocks.codeSummaries) return [];
-    if (table === mocks.wikiPages) return options.existingPages ?? [];
+    if (table === mocks.generationRuns) return options.baseline ? [baselineRun] : [];
+    if (table === mocks.wikiPages) return conditionText.includes("run-old") ? baselinePages : (options.existingPages ?? []);
+    if (table === mocks.wikiBlocks) return baselineBlocks;
     return [];
   };
 
@@ -309,7 +510,7 @@ function makeDb(options: { existingPages?: unknown[] } = {}) {
   const tx = {
     select: vi.fn((selection?: unknown) => ({
       from: vi.fn((table: unknown) => ({
-        where: vi.fn().mockResolvedValue(selection ? (options.existingPages ?? []) : selectRows(table))
+        where: vi.fn((condition?: unknown) => Promise.resolve(selection ? (options.existingPages ?? []) : selectRows(table, condition)))
       }))
     })),
     delete: vi.fn((table: unknown) => {
@@ -329,7 +530,7 @@ function makeDb(options: { existingPages?: unknown[] } = {}) {
     update: vi.fn(makeUpdate),
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => ({
-        where: vi.fn().mockResolvedValue(selectRows(table)),
+        where: vi.fn((condition?: unknown) => Promise.resolve(selectRows(table, condition))),
         orderBy: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([run]) }))
       }))
     })),
@@ -380,7 +581,16 @@ function providerResult(output: unknown) {
 }
 
 function statusUpdates(db: ReturnType<typeof makeDb>, status: string) {
-  return db.updates.filter((update): update is { status: string; errorMessage?: string; qualityReportJson?: any; aiUsageJson?: any } => {
+  return db.updates.filter((update): update is { status: string; errorMessage?: string; qualityReportJson?: any; aiUsageJson?: any; incrementalReportJson?: any } => {
     return Boolean(update && typeof update === "object" && "status" in update && update.status === status);
   });
+}
+
+function slugify(value: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 48);
+  return slug || "block";
 }

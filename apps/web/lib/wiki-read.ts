@@ -21,11 +21,8 @@ export async function getWikiReaderData(pageId: string) {
     db.select().from(wikiBlockOverlays).where(eq(wikiBlockOverlays.workspaceId, page.workspaceId))
   ]);
 
-  const blockIds = new Set(blockRows.map((row) => row.id));
   const stableKeys = new Set(blockRows.map((row) => row.stableKey));
-  const pageOverlays = overlayRows.filter(
-    (overlay) => overlay.targetBlockId && blockIds.has(overlay.targetBlockId) && stableKeys.has(overlay.targetStableKey)
-  );
+  const pageOverlays = overlayRows.filter((overlay) => stableKeys.has(overlay.targetStableKey));
   const blocks = applyEditOverlays(buildBlockTree(blockRows), pageOverlays);
 
   return {
