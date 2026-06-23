@@ -130,6 +130,8 @@ export const generationRuns = pgTable(
     backendIndexedEligibleFiles: integer("backend_indexed_eligible_files").notNull().default(0),
     generatedStatementCount: integer("generated_statement_count").notNull().default(0),
     generatedStatementWithEvidenceCount: integer("generated_statement_with_evidence_count").notNull().default(0),
+    qualityReportJson: jsonb("quality_report_json").$type<Record<string, unknown> | null>(),
+    aiUsageJson: jsonb("ai_usage_json").$type<Record<string, unknown> | null>(),
     errorMessage: text("error_message"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),

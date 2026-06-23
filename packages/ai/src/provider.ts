@@ -41,8 +41,24 @@ export type GenerateProductWikiRepairInput = {
   validationErrors: string[];
 };
 
+export type ProviderUsage = {
+  provider: string;
+  model: string;
+  promptTokenEstimate: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  inputCharCount: number;
+  outputCharCount: number;
+};
+
+export type GenerateProductWikiResult = {
+  output: unknown;
+  usage: ProviderUsage;
+};
+
 export type AIProvider = {
-  generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<unknown>;
+  generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<GenerateProductWikiResult>;
 };
 
 export class StructuredOutputUnsupportedError extends Error {

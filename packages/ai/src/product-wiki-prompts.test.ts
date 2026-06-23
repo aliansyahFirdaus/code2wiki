@@ -107,6 +107,32 @@ describe("product wiki prompts", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.parse(requestBody(fetchMock).messages[1].content).task).toBe("repair_product_wiki_json");
   });
+
+  it("OpenRouterProvider returns parsed output and sanitized usage", async () => {
+    const fetchMock = mockFetch();
+    const result = await provider().generateProductWiki(input());
+
+    expect(result.output).toEqual({ pages: [] });
+    expect(result.usage).toMatchObject({
+      provider: "openrouter",
+      model: "test-model",
+      promptTokens: 11,
+      completionTokens: 7,
+      totalTokens: 18,
+      outputCharCount: JSON.stringify({ pages: [] }).length
+    });
+    expect(Object.keys(result.usage).sort()).toEqual([
+      "completionTokens",
+      "inputCharCount",
+      "model",
+      "outputCharCount",
+      "promptTokenEstimate",
+      "promptTokens",
+      "provider",
+      "totalTokens"
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 function messageText(messages: ReturnType<typeof buildProductWikiMessages>) {
@@ -188,7 +214,11 @@ function mockFetch() {
   const fetchMock = vi.fn().mockResolvedValue({
     ok: true,
     status: 200,
-    text: vi.fn().mockResolvedValue(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ pages: [] }) } }] }))
+    text: vi.fn().mockResolvedValue(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({ pages: [] }) } }],
+      usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18, raw_provider_field: "ignored" },
+      raw_headers: { authorization: "Bearer secret" }
+    }))
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;

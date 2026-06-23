@@ -1,0 +1,144 @@
+import { describe, expect, it } from "vitest";
+
+import { validateQuality } from "./quality-validator";
+import type { ProductWikiBlock } from "@code2wiki/document";
+
+describe("quality validator", () => {
+  it("passes valid evidence-backed output", () => {
+    const report = validateQuality(input());
+
+    expect(report.gateResult).toBe("PASS");
+  });
+
+  it("fails for missing evidence, wrong-generation evidence, invented page key, leaks, empty page, and unsupported related page", () => {
+    const report = validateQuality(
+      input({
+        allowedPageKeys: ["crew.add"],
+        evidence: [
+          { id: "ev-1", generationRunId: "run-2", repositoryRole: "FRONTEND" },
+          { id: "ev-2", generationRunId: "run-1", repositoryRole: "BACKEND" }
+        ],
+        output: {
+          pages: [
+            {
+              pageKey: "invented",
+              title: "Invented",
+              blocks: [
+                block({ stableKey: "missing", evidenceIds: [] }),
+                block({ stableKey: "wrong-run", evidenceIds: ["ev-1"] }),
+                block({ stableKey: "leak", text: "Authorization: Bearer live-token sk-or-v1-secretsecret OPENROUTER_API_KEY=secret /Users/me/app x-openrouter" }),
+                relatedPage("unknown-page")
+              ]
+            },
+            { pageKey: "crew.add", title: "Empty", blocks: [] }
+          ]
+        }
+      })
+    );
+
+    expect(report.gateResult).toBe("FAIL");
+    expect(codes(report)).toEqual(expect.arrayContaining([
+      "CODE_STATEMENT_WITHOUT_VALID_EVIDENCE",
+      "EVIDENCE_NOT_SAME_GENERATION",
+      "INVENTED_PAGE_KEY",
+      "AUTHORIZATION_BEARER_LEAK",
+      "SECRET_TOKEN_LEAK",
+      "RAW_ENV_ASSIGNMENT_LEAK",
+      "LOCAL_PATH_LEAK",
+      "PROVIDER_METADATA_LEAK",
+      "EMPTY_PAGE",
+      "UNSUPPORTED_RELATED_PAGE"
+    ]));
+  });
+
+  it("warn checks do not fail gate", () => {
+    const report = validateQuality(
+      input({
+        evidence: [
+          { id: "ev-1", generationRunId: "run-1", repositoryRole: "FRONTEND" },
+          { id: "ev-2", generationRunId: "run-1", repositoryRole: "BACKEND" },
+          { id: "ev-3", generationRunId: "run-1", repositoryRole: "BACKEND" },
+          { id: "ev-4", generationRunId: "run-1", repositoryRole: "BACKEND" },
+          { id: "ev-5", generationRunId: "run-1", repositoryRole: "BACKEND" }
+        ],
+        output: {
+          pages: [
+            {
+              pageKey: "crew.add",
+              title: "Add Crew",
+              blocks: [
+                block({ stableKey: "a", text: "Some various stuff can happen etc.", evidenceIds: ["ev-1"] }),
+                block({ stableKey: "b", text: "Some various stuff can happen etc.", evidenceIds: ["ev-1"] }),
+                paragraph("Crew can save after validation."),
+                { ...block({ stableKey: "long", evidenceIds: ["ev-1"] }), text: "x".repeat(501), type: "statement" as const, confidence: 0.8, lastGeneratedRunId: "run-1" },
+                openQuestion(),
+                openQuestion()
+              ]
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.gateResult).toBe("WARN");
+    expect(report.issues.every((issue) => issue.severity === "WARN")).toBe(true);
+  });
+});
+
+function input(overrides: Partial<Parameters<typeof validateQuality>[0]> = {}): Parameters<typeof validateQuality>[0] {
+  return {
+    generationRunId: "run-1",
+    allowedPageKeys: ["crew.add"],
+    evidence: [
+      { id: "ev-1", generationRunId: "run-1", repositoryRole: "FRONTEND" },
+      { id: "ev-2", generationRunId: "run-1", repositoryRole: "BACKEND" }
+    ],
+    output: {
+      pages: [
+        {
+          pageKey: "crew.add",
+          title: "Add Crew",
+          blocks: [
+            block({ stableKey: "fe", text: "Crew can be added from the form.", evidenceIds: ["ev-1"] }),
+            block({ stableKey: "be", text: "Crew creation is saved by the API.", evidenceIds: ["ev-2"] })
+          ]
+        }
+      ]
+    },
+    ...overrides
+  };
+}
+
+function block(overrides: Partial<ProductWikiBlock & { type: "statement" }> = {}) {
+  return {
+    id: `blk-${overrides.stableKey ?? "statement"}`,
+    stableKey: overrides.stableKey ?? "statement",
+    type: "statement" as const,
+    origin: "CODE" as const,
+    reviewState: "VERIFIED" as const,
+    sourceHash: "source",
+    contentHash: "content",
+    locked: true,
+    text: "Crew can be added.",
+    confidence: 0.8,
+    evidenceIds: ["ev-1"],
+    lastGeneratedRunId: "run-1",
+    ...overrides
+  };
+}
+
+function paragraph(text: string) {
+  return { ...block({ stableKey: "paragraph", evidenceIds: [] }), type: "paragraph" as const, text };
+}
+
+function relatedPage(pageId: string) {
+  return { ...block({ stableKey: "related", evidenceIds: [] }), type: "related_page" as const, pageId, title: "Unknown" };
+}
+
+function openQuestion() {
+  return { ...block({ stableKey: `question-${Math.random()}`, evidenceIds: [] }), type: "open_question" as const, question: "What happens?", reason: "Needs review." };
+}
+
+function codes(report: ReturnType<typeof validateQuality>) {
+  return report.issues.map((issue) => issue.code);
+}

@@ -1,8 +1,10 @@
 import {
   StructuredOutputUnsupportedError,
   type AIProvider,
+  type GenerateProductWikiResult,
   type GenerateProductWikiInput,
-  type GenerateProductWikiRepairInput
+  type GenerateProductWikiRepairInput,
+  type ProviderUsage
 } from "./provider";
 import { buildProductWikiMessages, buildProductWikiRepairMessages } from "./product-wiki-prompts";
 
@@ -55,7 +57,7 @@ const productWikiJsonSchema = {
 } as const;
 
 export class OpenRouterProvider implements AIProvider {
-  async generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<unknown> {
+  async generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<GenerateProductWikiResult> {
     const apiKey = process.env.OPENROUTER_API_KEY;
     const model = process.env.OPENROUTER_MODEL;
     const baseUrl = process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
@@ -66,6 +68,11 @@ export class OpenRouterProvider implements AIProvider {
     if (!model) {
       throw new Error("OPENROUTER_MODEL is required.");
     }
+
+    const messages = repair
+      ? buildProductWikiRepairMessages(input, repair.invalidOutput, repair.validationErrors)
+      : buildProductWikiMessages(input);
+    const inputCharCount = messages.reduce((total, message) => total + message.content.length, 0);
 
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -87,9 +94,7 @@ export class OpenRouterProvider implements AIProvider {
             schema: productWikiJsonSchema
           }
         },
-        messages: repair
-          ? buildProductWikiRepairMessages(input, repair.invalidOutput, repair.validationErrors)
-          : buildProductWikiMessages(input)
+        messages
       })
     });
 
@@ -109,7 +114,10 @@ export class OpenRouterProvider implements AIProvider {
       throw new Error("OpenRouter response did not include message content.");
     }
 
-    return parseJsonOrString(content);
+    return {
+      output: parseJsonOrString(content),
+      usage: sanitizedUsage({ body, model, inputCharCount, outputCharCount: content.length })
+    };
   }
 }
 
@@ -134,4 +142,26 @@ function isStructuredOutputUnsupported(status: number, body: string) {
     status === 400 &&
     /response_format|json_schema|structured|require_parameters|unsupported|not support|parameters/i.test(body)
   );
+}
+
+function sanitizedUsage(input: { body: unknown; model: string; inputCharCount: number; outputCharCount: number }): ProviderUsage {
+  const usage = isRecord(input.body) && isRecord(input.body.usage) ? input.body.usage : {};
+  return {
+    provider: "openrouter",
+    model: input.model,
+    promptTokenEstimate: Math.ceil(input.inputCharCount / 4),
+    promptTokens: numberOrNull(usage.prompt_tokens),
+    completionTokens: numberOrNull(usage.completion_tokens),
+    totalTokens: numberOrNull(usage.total_tokens),
+    inputCharCount: input.inputCharCount,
+    outputCharCount: input.outputCharCount
+  };
+}
+
+function numberOrNull(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

@@ -57,9 +57,34 @@ vi.mock("@code2wiki/db", () => ({
 }));
 
 vi.mock("@code2wiki/ai", () => ({
+  buildAiUsageCall: vi.fn((kind: string, usage: unknown) => ({
+    kind,
+    usage,
+    promptTokensUsed: 10,
+    completionTokensUsed: 5,
+    totalTokensUsed: 15,
+    estimatedCostUsdMicros: null,
+    pricingSource: null
+  })),
+  buildAiUsageReport: vi.fn((calls: unknown[]) => ({
+    calls,
+    summary: {
+      callCount: calls.length,
+      promptTokens: calls.length * 10,
+      completionTokens: calls.length * 5,
+      totalTokens: calls.length * 15,
+      estimatedCostUsdMicros: null,
+      pricingSource: null
+    }
+  })),
   OpenRouterProvider: vi.fn(() => ({ generateProductWiki: mocks.generateProductWiki })),
   ProductWikiValidationError: mocks.ProductWikiValidationError,
   StructuredOutputUnsupportedError: class StructuredOutputUnsupportedError extends Error {},
+  validateQuality: vi.fn((input: { output: { pages?: Array<{ blocks: Array<{ text?: string }> }> } | null }) => {
+    const text = input.output?.pages?.flatMap((page) => page.blocks).map((block) => block.text ?? "").join("\n") ?? "";
+    const gateResult = text.includes("quality fail") ? "FAIL" : text.includes("needs warning") ? "WARN" : "PASS";
+    return { gateResult, issues: gateResult === "PASS" ? [] : [{ code: gateResult, severity: gateResult === "FAIL" ? "ERROR" : "WARN", message: gateResult }], metrics: [] };
+  }),
   validateProductWikiOutput: vi.fn((input: { generationRunId: string; allowedPageKeys: string[]; validEvidenceIds: string[]; output: unknown }) => {
     const output = input.output as { pages?: Array<{ pageKey: string; title: string; blocks: Array<{ type: string; text?: string; evidenceIds?: string[]; confidence?: number }> }> };
     if (!output?.pages?.length) {
@@ -107,7 +132,7 @@ describe("generateWiki trust fallback handling", () => {
   it("sets AI_OUTPUT_INVALID and inserts no wiki pages or blocks when repair output remains invalid", async () => {
     const db = makeDb();
     mocks.getDb.mockReturnValue(db.instance);
-    mocks.generateProductWiki.mockResolvedValueOnce(invalidOutput()).mockResolvedValueOnce(invalidOutput());
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(invalidOutput())).mockResolvedValueOnce(providerResult(invalidOutput()));
 
     await expect(generateWiki("run-1")).resolves.toMatchObject({ status: "invalid", generationRunId: "run-1" });
 
@@ -165,7 +190,7 @@ describe("generateWiki trust fallback handling", () => {
   it("still completes and persists wiki pages and blocks for valid output", async () => {
     const db = makeDb();
     mocks.getDb.mockReturnValue(db.instance);
-    mocks.generateProductWiki.mockResolvedValueOnce(validOutput());
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput()));
 
     await expect(generateWiki("run-1")).resolves.toMatchObject({
       status: "completed",
@@ -177,6 +202,40 @@ describe("generateWiki trust fallback handling", () => {
     expect(statusUpdates(db, "COMPLETED")).toHaveLength(1);
     expect(db.inserts).toEqual(expect.arrayContaining([expect.objectContaining({ table: mocks.wikiPages })]));
     expect(db.inserts).toEqual(expect.arrayContaining([expect.objectContaining({ table: mocks.wikiBlocks })]));
+  });
+
+  it("aggregates generation and repair usage", async () => {
+    const db = makeDb();
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(invalidOutput())).mockResolvedValueOnce(providerResult(validOutput()));
+
+    await generateWiki("run-1");
+
+    const update = statusUpdates(db, "COMPLETED")[0];
+    expect(update.aiUsageJson?.summary.callCount).toBe(2);
+  });
+
+  it("sets AI_OUTPUT_INVALID and inserts no wiki output on quality FAIL", async () => {
+    const db = makeDb();
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput("quality fail")));
+
+    const result = await generateWiki("run-1");
+
+    expect(result).toMatchObject({ status: "invalid", errorMessage: "QUALITY_GATE_FAILED" });
+    expect(statusUpdates(db, "AI_OUTPUT_INVALID")[0].qualityReportJson.gateResult).toBe("FAIL");
+    expect(db.inserts).not.toEqual(expect.arrayContaining([expect.objectContaining({ table: mocks.wikiPages })]));
+    expect(db.inserts).not.toEqual(expect.arrayContaining([expect.objectContaining({ table: mocks.wikiBlocks })]));
+  });
+
+  it("completes on quality WARN", async () => {
+    const db = makeDb();
+    mocks.getDb.mockReturnValue(db.instance);
+    mocks.generateProductWiki.mockResolvedValueOnce(providerResult(validOutput("needs warning")));
+
+    await expect(generateWiki("run-1")).resolves.toMatchObject({ status: "completed" });
+
+    expect(statusUpdates(db, "COMPLETED")[0].qualityReportJson.gateResult).toBe("WARN");
   });
 });
 
@@ -280,13 +339,13 @@ function makeDb(options: { existingPages?: unknown[] } = {}) {
   return { instance, inserts, deletes, updates, overlayMutations };
 }
 
-function validOutput() {
+function validOutput(text = "Crew can be added.") {
   return {
     pages: [
       {
         pageKey: "crew.add",
         title: "Crew Add",
-        blocks: [{ type: "statement", text: "Crew can be added.", evidenceIds: ["ev-1"], confidence: 0.95 }]
+        blocks: [{ type: "statement", text, evidenceIds: ["ev-1"], confidence: 0.95 }]
       }
     ]
   };
@@ -304,8 +363,24 @@ function invalidOutput() {
   };
 }
 
+function providerResult(output: unknown) {
+  return {
+    output,
+    usage: {
+      provider: "openrouter",
+      model: "test-model",
+      promptTokenEstimate: 10,
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+      inputCharCount: 40,
+      outputCharCount: 20
+    }
+  };
+}
+
 function statusUpdates(db: ReturnType<typeof makeDb>, status: string) {
-  return db.updates.filter((update): update is { status: string; errorMessage?: string } => {
+  return db.updates.filter((update): update is { status: string; errorMessage?: string; qualityReportJson?: any; aiUsageJson?: any } => {
     return Boolean(update && typeof update === "object" && "status" in update && update.status === status);
   });
 }

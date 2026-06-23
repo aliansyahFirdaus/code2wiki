@@ -2,12 +2,19 @@ import { createHash } from "node:crypto";
 
 import { buildRetrievalContexts, type CodeMap, type CodeSummary, type RetrievalContext } from "@code2wiki/analyzer";
 import {
+  buildAiUsageCall,
+  buildAiUsageReport,
   OpenRouterProvider,
   ProductWikiValidationError,
   StructuredOutputUnsupportedError,
+  validateQuality,
+  type AiUsageCall,
+  type AiUsageReport,
   validateProductWikiOutput,
   type GenerateProductWikiEvidence,
   type GenerateProductWikiFact,
+  type ProviderUsage,
+  type QualityReport,
   type ProductWikiPageGroup
 } from "@code2wiki/ai";
 import { codeFacts, codeMaps, codeSummaries, evidence, generationRuns, getDb, wikiBlocks, wikiPages } from "@code2wiki/db";
@@ -34,6 +41,7 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
   }
 
   let pageGroups: ProductWikiPageGroup[] = [];
+  const usageCalls: AiUsageCall[] = [];
 
   try {
     const [factRows, evidenceRows, codeMapRows, summaryRows] = await Promise.all([
@@ -57,12 +65,14 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
     pageGroups = fitPageGroupsForDemo(retrieval.usedFallback ? fallbackPageGroups : pageGroupsFromRetrievalContexts(retrieval.contexts, evidenceRows));
 
     if (pageGroups.length === 0) {
-      await markInvalid(run.id, "NO_FACTS_FOR_GENERATION");
+      await markInvalid(run.id, "NO_FACTS_FOR_GENERATION", invalidOutputQualityReport(), buildAiUsageReport([]));
       return { status: "invalid", generationRunId: run.id, errorMessage: "NO_FACTS_FOR_GENERATION" };
     }
 
     const provider = new OpenRouterProvider();
-    let rawOutput = await provider.generateProductWiki({ generationRunId: run.id, pageGroups });
+    let generationResult = await provider.generateProductWiki({ generationRunId: run.id, pageGroups });
+    usageCalls.push(buildAiUsageCall("generation", generationResult.usage));
+    let rawOutput = generationResult.output;
 
     await db.update(generationRuns).set({ status: "VALIDATING", errorMessage: null }).where(eq(generationRuns.id, run.id));
 
@@ -82,13 +92,15 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
         throw error;
       }
 
-      rawOutput = await provider.generateProductWiki(
+      generationResult = await provider.generateProductWiki(
         { generationRunId: run.id, pageGroups },
         {
           invalidOutput: rawOutput,
           validationErrors: error.validationErrors
         }
       );
+      usageCalls.push(buildAiUsageCall("repair", generationResult.usage));
+      rawOutput = generationResult.output;
 
       try {
         output = validateProductWikiOutput({
@@ -102,12 +114,29 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
           repairError instanceof ProductWikiValidationError
             ? sanitizeErrorMessage(repairError.message)
             : sanitizeErrorMessage(repairError);
-        await markInvalid(run.id, errorMessage);
+        await markInvalid(run.id, errorMessage, invalidOutputQualityReport(), buildAiUsageReport(usageCalls));
         return { status: "invalid", generationRunId: run.id, errorMessage };
       }
     }
 
-    await persistWikiOutput(run, output);
+    const qualityReport = validateQuality({
+      generationRunId: run.id,
+      allowedPageKeys,
+      evidence: evidenceRows.map((row) => ({
+        id: row.id,
+        generationRunId: row.generationRunId,
+        repositoryRole: row.repositoryRole
+      })),
+      output
+    });
+    const aiUsageReport = buildAiUsageReport(usageCalls);
+
+    if (qualityReport.gateResult === "FAIL") {
+      await markInvalid(run.id, "QUALITY_GATE_FAILED", qualityReport, aiUsageReport);
+      return { status: "invalid", generationRunId: run.id, errorMessage: "QUALITY_GATE_FAILED" };
+    }
+
+    await persistWikiOutput(run, output, qualityReport, aiUsageReport);
 
     return {
       status: "completed",
@@ -116,13 +145,17 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
       generatedStatementWithEvidenceCount: output.generatedStatementWithEvidenceCount
     };
   } catch (error) {
+    const aiUsageReport = buildAiUsageReport(
+      usageCalls.length > 0 ? usageCalls : [buildAiUsageCall("generation", estimatedProviderUsage(run.id, pageGroups))]
+    );
+    const qualityReport = invalidOutputQualityReport();
     if (error instanceof StructuredOutputUnsupportedError) {
-      await markFailed(run.id, "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT");
+      await markFailed(run.id, "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT", qualityReport, aiUsageReport);
       return { status: "failed", generationRunId: run.id, errorMessage: "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT" };
     }
 
     const errorMessage = sanitizeErrorMessage(error);
-    await markFailed(run.id, errorMessage);
+    await markFailed(run.id, errorMessage, qualityReport, aiUsageReport);
     return { status: "failed", generationRunId: run.id, errorMessage };
   }
 }
@@ -304,7 +337,7 @@ function confidenceScore(confidence: string) {
 async function persistWikiOutput(run: ClaimedGenerationRun, output: ProductWikiOutput & {
   generatedStatementCount: number;
   generatedStatementWithEvidenceCount: number;
-}) {
+}, qualityReport: QualityReport, aiUsageReport: AiUsageReport) {
   const db = getDb();
   const pageRows = output.pages.map((page) => ({
     id: pageId(run.workspaceId, page.pageKey),
@@ -354,6 +387,8 @@ async function persistWikiOutput(run: ClaimedGenerationRun, output: ProductWikiO
       .set({
         generatedStatementCount: output.generatedStatementCount,
         generatedStatementWithEvidenceCount: output.generatedStatementWithEvidenceCount,
+        qualityReportJson: qualityReport,
+        aiUsageJson: aiUsageReport,
         status: "COMPLETED",
         errorMessage: null,
         finishedAt: new Date()
@@ -448,20 +483,50 @@ function compareFacts(left: typeof codeFacts.$inferSelect, right: typeof codeFac
   );
 }
 
-async function markInvalid(generationRunId: string, errorMessage: string) {
+async function markInvalid(generationRunId: string, errorMessage: string, qualityReport?: QualityReport, aiUsageReport?: AiUsageReport) {
   const db = getDb();
   await db
     .update(generationRuns)
-    .set({ status: "AI_OUTPUT_INVALID", errorMessage: sanitizeErrorMessage(errorMessage), finishedAt: new Date() })
+    .set({
+      status: "AI_OUTPUT_INVALID",
+      errorMessage: sanitizeErrorMessage(errorMessage),
+      qualityReportJson: qualityReport,
+      aiUsageJson: aiUsageReport,
+      finishedAt: new Date()
+    })
     .where(eq(generationRuns.id, generationRunId));
 }
 
-async function markFailed(generationRunId: string, errorMessage: string) {
+async function markFailed(generationRunId: string, errorMessage: string, qualityReport?: QualityReport, aiUsageReport?: AiUsageReport) {
   const db = getDb();
   await db
     .update(generationRuns)
-    .set({ status: "FAILED", errorMessage: sanitizeErrorMessage(errorMessage), finishedAt: new Date() })
+    .set({
+      status: "FAILED",
+      errorMessage: sanitizeErrorMessage(errorMessage),
+      qualityReportJson: qualityReport,
+      aiUsageJson: aiUsageReport,
+      finishedAt: new Date()
+    })
     .where(eq(generationRuns.id, generationRunId));
+}
+
+function invalidOutputQualityReport(): QualityReport {
+  return validateQuality({ generationRunId: "", allowedPageKeys: [], evidence: [], output: null });
+}
+
+function estimatedProviderUsage(generationRunId: string, pageGroups: ProductWikiPageGroup[]): ProviderUsage {
+  const inputCharCount = JSON.stringify({ generationRunId, pageGroups }).length;
+  return {
+    provider: "openrouter",
+    model: process.env.OPENROUTER_MODEL ?? "unknown",
+    promptTokenEstimate: Math.ceil(inputCharCount / 4),
+    promptTokens: null,
+    completionTokens: null,
+    totalTokens: null,
+    inputCharCount,
+    outputCharCount: 0
+  };
 }
 
 function sanitizeErrorMessage(error: unknown) {
