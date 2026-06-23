@@ -102,14 +102,8 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
           repairError instanceof ProductWikiValidationError
             ? sanitizeErrorMessage(repairError.message)
             : sanitizeErrorMessage(repairError);
-        const fallback = buildDeterministicWikiOutput(run, pageGroups);
-        await persistWikiOutput(run, fallback);
-        return {
-          status: "completed",
-          generationRunId: run.id,
-          generatedStatementCount: fallback.generatedStatementCount,
-          generatedStatementWithEvidenceCount: fallback.generatedStatementWithEvidenceCount
-        };
+        await markInvalid(run.id, errorMessage);
+        return { status: "invalid", generationRunId: run.id, errorMessage };
       }
     }
 
@@ -127,14 +121,9 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
       return { status: "failed", generationRunId: run.id, errorMessage: "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT" };
     }
 
-    const fallback = buildDeterministicWikiOutput(run, pageGroups);
-    await persistWikiOutput(run, fallback);
-    return {
-      status: "completed",
-      generationRunId: run.id,
-      generatedStatementCount: fallback.generatedStatementCount,
-      generatedStatementWithEvidenceCount: fallback.generatedStatementWithEvidenceCount
-    };
+    const errorMessage = sanitizeErrorMessage(error);
+    await markFailed(run.id, errorMessage);
+    return { status: "failed", generationRunId: run.id, errorMessage };
   }
 }
 
@@ -312,72 +301,6 @@ function confidenceScore(confidence: string) {
   return confidence === "HIGH" ? 0.95 : confidence === "MEDIUM" ? 0.8 : confidence === "LOW" ? 0.6 : 0.3;
 }
 
-function buildDeterministicWikiOutput(
-  run: ClaimedGenerationRun,
-  pageGroups: ProductWikiPageGroup[]
-): ProductWikiOutput & {
-  generatedStatementCount: number;
-  generatedStatementWithEvidenceCount: number;
-} {
-  const pages = pageGroups.map((group) => ({
-    pageKey: group.pageKey,
-    title: group.title,
-    blocks: [
-      createBlock(run.id, group.pageKey, "title", 0, { type: "title", text: group.title }),
-      createBlock(run.id, group.pageKey, "paragraph", 1, {
-        type: "paragraph",
-        text: `Generated from ${group.facts.length} code facts in ${group.evidence.length} evidence snippets.`
-      }),
-      ...group.facts.slice(0, 8).map((fact, index) =>
-        createBlock(run.id, group.pageKey, "statement", index + 2, {
-          type: "statement",
-          text: fact.text,
-          confidence: fact.confidence,
-          evidenceIds: fact.evidenceIds,
-          lastGeneratedRunId: run.id
-        })
-      )
-    ] satisfies ProductWikiBlock[]
-  }));
-  const generatedStatementCount = pages.flatMap((page) => page.blocks).filter((block) => block.type === "statement").length;
-
-  return {
-    pages,
-    generatedStatementCount,
-    generatedStatementWithEvidenceCount: generatedStatementCount
-  };
-}
-
-function createBlock<T extends Omit<ProductWikiBlock, keyof BaseBlockFields>>(
-  generationRunId: string,
-  pageKey: string,
-  kind: string,
-  index: number,
-  block: T
-): ProductWikiBlock {
-  const seed = [generationRunId, pageKey, kind, index, JSON.stringify(block)].join("|");
-  return {
-    id: `block_${hash(seed)}`,
-    stableKey: `${pageKey}.${kind}.${index}`,
-    origin: "CODE",
-    reviewState: "VERIFIED",
-    sourceHash: hash(`${seed}:source`),
-    contentHash: hash(`${seed}:content`),
-    locked: true,
-    ...block
-  } as ProductWikiBlock;
-}
-
-type BaseBlockFields = {
-  id: string;
-  stableKey: string;
-  origin: ProductWikiBlock["origin"];
-  reviewState: ProductWikiBlock["reviewState"];
-  sourceHash: string;
-  contentHash: string;
-  locked: boolean;
-};
-
 async function persistWikiOutput(run: ClaimedGenerationRun, output: ProductWikiOutput & {
   generatedStatementCount: number;
   generatedStatementWithEvidenceCount: number;
@@ -545,7 +468,10 @@ function sanitizeErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return message
     .replace(/sk-or-v1-[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/\b(?:sk|pk|rk|or)-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer [redacted]")
+    .replace(/Authorization\s*:\s*Bearer\s+[A-Za-z0-9._-]+/gi, "Authorization: Bearer [redacted]")
+    .replace(/\b[A-Z][A-Z0-9_]{2,}\s*=\s*[^,\s"'`]+/g, "[redacted-env]")
     .slice(0, 1000);
 }
 

@@ -6,7 +6,7 @@
     "dev:web": "pnpm --filter @code2wiki/web dev",
     "db:migrate": "drizzle-kit migrate",
     "worker:run": "pnpm --filter @code2wiki/worker worker:run",
-    "test": "vitest run packages/analyzer/src/scanner.test.ts packages/analyzer/src/code-map.test.ts packages/analyzer/src/summaries.test.ts packages/analyzer/src/retrieval.test.ts packages/ai/src/validate-output.test.ts packages/ai/src/product-wiki-prompts.test.ts apps/web/lib/wiki-blocks.test.ts apps/web/lib/tag-pairing.test.ts apps/web/lib/generation-run-response.test.ts apps/worker/src/index.test.ts apps/worker/src/jobs/role-mapping.test.ts apps/worker/src/jobs/analyze-code.test.ts",
+    "test": "vitest run packages/analyzer/src/scanner.test.ts packages/analyzer/src/code-map.test.ts packages/analyzer/src/summaries.test.ts packages/analyzer/src/retrieval.test.ts packages/ai/src/validate-output.test.ts packages/ai/src/product-wiki-prompts.test.ts apps/web/lib/wiki-blocks.test.ts apps/web/lib/tag-pairing.test.ts apps/web/lib/generation-run-response.test.ts apps/worker/src/index.test.ts apps/worker/src/jobs/role-mapping.test.ts apps/worker/src/jobs/analyze-code.test.ts apps/worker/src/jobs/generate-wiki.test.ts",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
