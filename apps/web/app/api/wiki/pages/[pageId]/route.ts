@@ -1,5 +1,18 @@
 import { NextResponse } from "next/server";
 
-export function GET() {
-  return NextResponse.json({ error: "Wiki page loading is not implemented in Phase 1." }, { status: 501 });
+import { getWikiReaderData } from "../../../../../lib/wiki-read";
+
+type Context = {
+  params: Promise<{ pageId: string }>;
+};
+
+export async function GET(_request: Request, context: Context) {
+  const { pageId } = await context.params;
+  const data = await getWikiReaderData(pageId);
+
+  if (!data) {
+    return NextResponse.json({ error: "Wiki page not found." }, { status: 404 });
+  }
+
+  return NextResponse.json(data);
 }

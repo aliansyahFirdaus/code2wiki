@@ -8,6 +8,10 @@
     "@code2wiki/db": "workspace:*",
     "@code2wiki/document": "workspace:*",
     "@code2wiki/github": "workspace:*",
-    "@code2wiki/shared": "workspace:*"
+    "@code2wiki/shared": "workspace:*",
+    "@tiptap/core": "^2.10.4",
+    "@tiptap/pm": "^2.10.4",
+    "@tiptap/react": "^2.10.4",
+    "@tiptap/starter-kit": "^2.10.4"
   }
 }
