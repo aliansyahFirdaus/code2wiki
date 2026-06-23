@@ -4,6 +4,7 @@ import { desc, eq, inArray } from "drizzle-orm";
 
 import { generationRuns, getDb, githubInstallations, repositories, wikiPages } from "@code2wiki/db";
 import { sanitizeErrorText } from "@code2wiki/shared";
+import { formatCoverage } from "../../lib/wiki-blocks";
 
 export const dynamic = "force-dynamic";
 
@@ -64,19 +65,29 @@ export default async function WorkspacePage({ searchParams }: Props) {
       </Section>
 
       <Section title="Generation runs" empty={data.runs.length === 0 ? "No generation runs yet." : null}>
-        {data.runs.map((run) => (
-          <article key={run.id} style={cardStyle}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
-              <strong>{run.status}</strong>
-              <span style={mutedStyle}>{run.createdAt.toISOString()}</span>
-            </div>
-            <p style={mutedStyle}>
-              FE {run.frontendTag} ({run.frontendCommitSha.slice(0, 12)}) · BE {run.backendTag} ({run.backendCommitSha.slice(0, 12)})
-            </p>
-            {run.errorMessage ? <p style={errorStyle}>{sanitizeErrorText(run.errorMessage)}</p> : null}
-            <WikiLinks pages={data.pagesByRun.get(run.id) ?? []} />
-          </article>
-        ))}
+        {data.runs.map((run) => {
+          const frontendRepository = data.repositoriesById.get(run.frontendRepositoryId)?.repositoryFullName ?? run.frontendRepositoryId;
+          const backendRepository = data.repositoriesById.get(run.backendRepositoryId)?.repositoryFullName ?? run.backendRepositoryId;
+
+          return (
+            <article key={run.id} style={cardStyle}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+                <strong>{run.status}</strong>
+                <span style={mutedStyle}>{run.createdAt.toISOString()}</span>
+              </div>
+              <p style={mutedStyle}>
+                FE {frontendRepository} · {run.frontendTag} ({run.frontendCommitSha.slice(0, 12)}) ·{" "}
+                {formatCoverage({ indexed: run.frontendIndexedEligibleFiles, total: run.frontendTotalEligibleFiles })}
+              </p>
+              <p style={mutedStyle}>
+                BE {backendRepository} · {run.backendTag} ({run.backendCommitSha.slice(0, 12)}) ·{" "}
+                {formatCoverage({ indexed: run.backendIndexedEligibleFiles, total: run.backendTotalEligibleFiles })}
+              </p>
+              {run.errorMessage ? <p style={errorStyle}>{sanitizeErrorText(run.errorMessage)}</p> : null}
+              <WikiLinks pages={data.pagesByRun.get(run.id) ?? []} />
+            </article>
+          );
+        })}
       </Section>
     </main>
   );
@@ -98,7 +109,14 @@ async function loadWorkspaceData(workspaceId: string) {
     for (const page of pages) {
       pagesByRun.set(page.generationRunId, [...(pagesByRun.get(page.generationRunId) ?? []), page]);
     }
-    return { ok: true as const, installations, repositories: repoRows, runs, pagesByRun };
+    return {
+      ok: true as const,
+      installations,
+      repositories: repoRows,
+      repositoriesById: new Map(repoRows.map((repository) => [repository.id, repository])),
+      runs,
+      pagesByRun
+    };
   } catch (error) {
     return { ok: false as const, error: sanitizeErrorText(error) };
   }

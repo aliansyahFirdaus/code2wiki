@@ -1,7 +1,8 @@
-import { scanCode, type ScannerEvidence } from "@code2wiki/analyzer";
-import { codeFacts, evidence as evidenceTable, generationRuns, getDb, repositories } from "@code2wiki/db";
+import { buildCodeMap, scanCode, type ScannerEvidence } from "@code2wiki/analyzer";
+import { codeFacts, codeMaps, evidence as evidenceTable, generationRuns, getDb, repositories } from "@code2wiki/db";
 import { cloneRepositoryAtCommit, createGitHubInstallationAccessToken, type RepositoryCheckout } from "@code2wiki/github";
 import { and, asc, eq } from "drizzle-orm";
+import { assertGenerationRepositoryRoles, mapScanCoverage, type ScanCoverage } from "./role-mapping";
 
 type AnalyzeCodeResult =
   | { status: "skipped"; reason: string }
@@ -38,6 +39,7 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
       getActiveRepository(claimedRun.frontendRepositoryId),
       getActiveRepository(claimedRun.backendRepositoryId)
     ]);
+    assertGenerationRepositoryRoles(frontendRepository, backendRepository);
 
     const tokenByInstallationId = new Map<string, string>();
     const getInstallationToken = async (installationId: string) => {
@@ -69,25 +71,29 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
 
     const [frontendScan, backendScan] = await Promise.all([
       scanCode({
-        repositoryRole: "FRONTEND",
+        repositoryRole: frontendRepository.role,
         repositoryRoot: frontendCheckout.path
       }),
       scanCode({
-        repositoryRole: "BACKEND",
+        repositoryRole: backendRepository.role,
         repositoryRoot: backendCheckout.path
       })
     ]);
 
-    const totalEligibleFiles = frontendScan.totalEligibleFiles + backendScan.totalEligibleFiles;
-    const indexedEligibleFiles = frontendScan.indexedEligibleFiles + backendScan.indexedEligibleFiles;
-    const coverage = {
-      totalEligibleFiles,
-      indexedEligibleFiles,
-      frontendTotalEligibleFiles: frontendScan.totalEligibleFiles,
-      frontendIndexedEligibleFiles: frontendScan.indexedEligibleFiles,
-      backendTotalEligibleFiles: backendScan.totalEligibleFiles,
-      backendIndexedEligibleFiles: backendScan.indexedEligibleFiles
-    };
+    const coverage = mapScanCoverage([
+      {
+        repositoryRole: frontendRepository.role,
+        totalEligibleFiles: frontendScan.totalEligibleFiles,
+        indexedEligibleFiles: frontendScan.indexedEligibleFiles
+      },
+      {
+        repositoryRole: backendRepository.role,
+        totalEligibleFiles: backendScan.totalEligibleFiles,
+        indexedEligibleFiles: backendScan.indexedEligibleFiles
+      }
+    ]);
+    const totalEligibleFiles = coverage.totalEligibleFiles;
+    const indexedEligibleFiles = coverage.indexedEligibleFiles;
 
     if (totalEligibleFiles === 0) {
       await markNoEligibleFiles(claimedRun.id, coverage);
@@ -152,15 +158,38 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
         await tx.insert(codeFacts).values(codeFactRows);
       }
 
+      const codeMap = buildCodeMap({
+        generationRunId: claimedRun.id,
+        facts: codeFactRows,
+        evidence: evidenceRows.map(({ evidenceKey, ...row }) => row)
+      });
+      await tx
+        .insert(codeMaps)
+        .values({
+          id: `code_map_${claimedRun.id}`,
+          generationRunId: claimedRun.id,
+          sourceHash: codeMap.sourceHash,
+          mapJson: codeMap,
+          updatedAt: new Date()
+        })
+        .onConflictDoUpdate({
+          target: codeMaps.generationRunId,
+          set: {
+            sourceHash: codeMap.sourceHash,
+            mapJson: codeMap,
+            updatedAt: new Date()
+          }
+        });
+
       await tx
         .update(generationRuns)
         .set({
           totalEligibleFiles,
           indexedEligibleFiles,
-          frontendTotalEligibleFiles: frontendScan.totalEligibleFiles,
-          frontendIndexedEligibleFiles: frontendScan.indexedEligibleFiles,
-          backendTotalEligibleFiles: backendScan.totalEligibleFiles,
-          backendIndexedEligibleFiles: backendScan.indexedEligibleFiles,
+          frontendTotalEligibleFiles: coverage.frontendTotalEligibleFiles,
+          frontendIndexedEligibleFiles: coverage.frontendIndexedEligibleFiles,
+          backendTotalEligibleFiles: coverage.backendTotalEligibleFiles,
+          backendIndexedEligibleFiles: coverage.backendIndexedEligibleFiles,
           status: "FACTS_EXTRACTED",
           errorMessage: null
         })
@@ -172,10 +201,10 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
       generationRunId: claimedRun.id,
       totalEligibleFiles,
       indexedEligibleFiles,
-      frontendTotalEligibleFiles: frontendScan.totalEligibleFiles,
-      frontendIndexedEligibleFiles: frontendScan.indexedEligibleFiles,
-      backendTotalEligibleFiles: backendScan.totalEligibleFiles,
-      backendIndexedEligibleFiles: backendScan.indexedEligibleFiles
+      frontendTotalEligibleFiles: coverage.frontendTotalEligibleFiles,
+      frontendIndexedEligibleFiles: coverage.frontendIndexedEligibleFiles,
+      backendTotalEligibleFiles: coverage.backendTotalEligibleFiles,
+      backendIndexedEligibleFiles: coverage.backendIndexedEligibleFiles
     };
   } catch (error) {
     const errorMessage = sanitizeErrorMessage(error);
@@ -296,15 +325,6 @@ async function markFailed(
     })
     .where(eq(generationRuns.id, generationRunId));
 }
-
-type ScanCoverage = {
-  totalEligibleFiles: number;
-  indexedEligibleFiles: number;
-  frontendTotalEligibleFiles: number;
-  frontendIndexedEligibleFiles: number;
-  backendTotalEligibleFiles: number;
-  backendIndexedEligibleFiles: number;
-};
 
 async function markNoEligibleFiles(generationRunId: string, coverage: ScanCoverage) {
   const db = getDb();

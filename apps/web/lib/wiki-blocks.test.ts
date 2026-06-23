@@ -61,8 +61,10 @@ describe("wiki block reader helpers", () => {
     expect(sourceBadge(manual)).toBe("Manual");
   });
 
-  it("formats zero denominator coverage as N/A", () => {
-    expect(formatCoverage({ indexed: 0, total: 0 })).toBe("N/A");
+  it("formats missing and zero denominator coverage with explicit N/A reasons", () => {
+    expect(formatCoverage({ indexed: null, total: null })).toBe("N/A - no data");
+    expect(formatCoverage({ indexed: 0, total: 0 })).toBe("N/A - no eligible files");
+    expect(formatCoverage({ indexed: 1, total: 2 })).not.toBe("N/A");
   });
 
   it("applies the latest EDIT overlay by createdAt and id", () => {

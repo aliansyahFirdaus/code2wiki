@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, or } from "drizzle-orm";
 
 import { generationRuns, getDb, githubInstallations, repositories, tagEvents } from "@code2wiki/db";
 import { matchesTagPattern, parseTagWebhookEvent, verifyGitHubWebhookSignature } from "@code2wiki/github";
+import { buildGenerationPair, oppositeRepositoryRole, type TagPairEvent } from "../../../../lib/tag-pairing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -115,11 +116,19 @@ export async function POST(request: Request) {
       })
       .returning();
 
-    const oppositeRole = repository.role === "FRONTEND" ? "BACKEND" : "FRONTEND";
+    const currentPairEvent: TagPairEvent = {
+      id: currentEvent.id,
+      repositoryId: repository.id,
+      role: repository.role,
+      tag: parsed.tag,
+      commitSha: parsed.commitSha
+    };
+    const oppositeRole = oppositeRepositoryRole(repository.role);
     const [oppositeEvent] = await tx
       .select({
         id: tagEvents.id,
         repositoryId: tagEvents.repositoryId,
+        role: repositories.role,
         tag: tagEvents.tag,
         commitSha: tagEvents.commitSha
       })
@@ -130,7 +139,7 @@ export async function POST(request: Request) {
           eq(tagEvents.workspaceId, repository.workspaceId),
           eq(repositories.active, true),
           eq(repositories.role, oppositeRole),
-          inArray(tagEvents.status, ["WAITING_FOR_PAIR", "PAIRED"])
+          eq(tagEvents.status, "WAITING_FOR_PAIR")
         )
       )
       .orderBy(desc(tagEvents.receivedAt))
@@ -140,26 +149,22 @@ export async function POST(request: Request) {
       return { outcome: "WAITING_FOR_PAIR" as const, tagEventId: currentEvent.id };
     }
 
-    const frontend =
-      repository.role === "FRONTEND"
-        ? { repositoryId: repository.id, tag: parsed.tag, commitSha: parsed.commitSha }
-        : oppositeEvent;
-    const backend =
-      repository.role === "BACKEND"
-        ? { repositoryId: repository.id, tag: parsed.tag, commitSha: parsed.commitSha }
-        : oppositeEvent;
+    const pair = buildGenerationPair(currentPairEvent, oppositeEvent);
+    if (!pair) {
+      return { outcome: "WAITING_FOR_PAIR" as const, tagEventId: currentEvent.id };
+    }
 
     const [generationRun] = await tx
       .insert(generationRuns)
       .values({
         id: crypto.randomUUID(),
         workspaceId: repository.workspaceId,
-        frontendRepositoryId: frontend.repositoryId,
-        backendRepositoryId: backend.repositoryId,
-        frontendTag: frontend.tag,
-        frontendCommitSha: frontend.commitSha,
-        backendTag: backend.tag,
-        backendCommitSha: backend.commitSha,
+        frontendRepositoryId: pair.frontend.repositoryId,
+        backendRepositoryId: pair.backend.repositoryId,
+        frontendTag: pair.frontend.tag,
+        frontendCommitSha: pair.frontend.commitSha,
+        backendTag: pair.backend.tag,
+        backendCommitSha: pair.backend.commitSha,
         status: "QUEUED"
       })
       .onConflictDoNothing({
@@ -170,7 +175,7 @@ export async function POST(request: Request) {
     await tx
       .update(tagEvents)
       .set({ status: "PAIRED", processedAt: new Date() })
-      .where(inArray(tagEvents.id, [currentEvent.id, oppositeEvent.id]));
+      .where(inArray(tagEvents.id, [pair.frontend.id, pair.backend.id]));
 
     return {
       outcome: generationRun ? ("GENERATION_QUEUED" as const) : ("GENERATION_ALREADY_EXISTS" as const),

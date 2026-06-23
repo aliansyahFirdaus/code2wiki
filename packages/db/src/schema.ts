@@ -157,6 +157,21 @@ export const codeFacts = pgTable("code_facts", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 
+export const codeMaps = pgTable(
+  "code_maps",
+  {
+    id: text("id").primaryKey(),
+    generationRunId: text("generation_run_id").notNull(),
+    sourceHash: text("source_hash").notNull(),
+    mapJson: jsonb("map_json").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    generationRunUnique: uniqueIndex("code_maps_generation_run_unique").on(table.generationRunId)
+  })
+);
+
 export const evidence = pgTable("evidence", {
   id: text("id").primaryKey(),
   generationRunId: text("generation_run_id").notNull(),

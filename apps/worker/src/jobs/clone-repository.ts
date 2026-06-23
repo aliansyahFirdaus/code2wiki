@@ -1,6 +1,7 @@
 import { getDb, generationRuns, repositories } from "@code2wiki/db";
 import { createGitHubInstallationAccessToken, cloneRepositoryAtCommit, type RepositoryCheckout } from "@code2wiki/github";
 import { and, asc, eq } from "drizzle-orm";
+import { assertGenerationRepositoryRoles } from "./role-mapping";
 
 type CloneRepositoryResult =
   | { status: "skipped"; reason: string }
@@ -28,6 +29,7 @@ export async function cloneRepository(generationRunId?: string): Promise<CloneRe
       getActiveRepository(claimedRun.frontendRepositoryId),
       getActiveRepository(claimedRun.backendRepositoryId)
     ]);
+    assertGenerationRepositoryRoles(frontendRepository, backendRepository);
 
     const tokenByInstallationId = new Map<string, string>();
     const getInstallationToken = async (installationId: string) => {

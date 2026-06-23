@@ -30,8 +30,8 @@ export type TiptapDocument = {
 };
 
 export type CoverageInput = {
-  indexed: number;
-  total: number;
+  indexed: number | null | undefined;
+  total: number | null | undefined;
 };
 
 export type WikiOverlayRow = {
@@ -155,8 +155,11 @@ export function collectChangedEdits(blocks: ProductWikiBlock[], localText: Recor
 }
 
 export function formatCoverage(input: CoverageInput): string {
+  if (input.indexed == null || input.total == null) {
+    return "N/A - no data";
+  }
   if (input.total === 0) {
-    return "N/A";
+    return "N/A - no eligible files";
   }
 
   return `${input.indexed}/${input.total} (${Math.round((input.indexed / input.total) * 100)}%)`;

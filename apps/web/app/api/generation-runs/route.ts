@@ -3,6 +3,7 @@ import { desc, eq, inArray } from "drizzle-orm";
 
 import { generationRuns, getDb, wikiPages } from "@code2wiki/db";
 import { sanitizeErrorText } from "@code2wiki/shared";
+import { toGenerationRunResponse } from "../../../lib/generation-run-response";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +30,7 @@ export async function GET(request: Request) {
     }
 
     return NextResponse.json({
-      generationRuns: rows.map((run) => toRunResponse(run, pagesByRun.get(run.id) ?? []))
+      generationRuns: rows.map((run) => toGenerationRunResponse(run, pagesByRun.get(run.id) ?? []))
     });
   } catch (error) {
     return NextResponse.json(
@@ -37,36 +38,4 @@ export async function GET(request: Request) {
       { status: 503 }
     );
   }
-}
-
-function toRunResponse(run: typeof generationRuns.$inferSelect, pages: Array<typeof wikiPages.$inferSelect>) {
-  return {
-    id: run.id,
-    workspaceId: run.workspaceId,
-    frontendRepositoryId: run.frontendRepositoryId,
-    backendRepositoryId: run.backendRepositoryId,
-    frontendTag: run.frontendTag,
-    frontendCommitSha: run.frontendCommitSha,
-    backendTag: run.backendTag,
-    backendCommitSha: run.backendCommitSha,
-    status: run.status,
-    totalEligibleFiles: run.totalEligibleFiles,
-    indexedEligibleFiles: run.indexedEligibleFiles,
-    frontendTotalEligibleFiles: run.frontendTotalEligibleFiles,
-    frontendIndexedEligibleFiles: run.frontendIndexedEligibleFiles,
-    backendTotalEligibleFiles: run.backendTotalEligibleFiles,
-    backendIndexedEligibleFiles: run.backendIndexedEligibleFiles,
-    generatedStatementCount: run.generatedStatementCount,
-    generatedStatementWithEvidenceCount: run.generatedStatementWithEvidenceCount,
-    errorMessage: run.errorMessage ? sanitizeErrorText(run.errorMessage) : null,
-    startedAt: run.startedAt?.toISOString() ?? null,
-    finishedAt: run.finishedAt?.toISOString() ?? null,
-    createdAt: run.createdAt.toISOString(),
-    wikiPages: pages.map((page) => ({
-      id: page.id,
-      title: page.title,
-      pageKey: page.pageKey,
-      href: `/wiki/${page.id}`
-    }))
-  };
 }
