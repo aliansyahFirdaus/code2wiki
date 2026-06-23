@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { getDb, githubInstallations } from "@code2wiki/db";
 import { decodeWorkspaceIdFromState, mapSetupActionToInstallationStatus } from "@code2wiki/github";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const installationId = url.searchParams.get("installation_id")?.trim();

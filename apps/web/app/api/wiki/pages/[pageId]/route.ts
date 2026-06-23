@@ -6,6 +6,8 @@ type Context = {
   params: Promise<{ pageId: string }>;
 };
 
+export const dynamic = "force-dynamic";
+
 export async function GET(_request: Request, context: Context) {
   const { pageId } = await context.params;
   const data = await getWikiReaderData(pageId);

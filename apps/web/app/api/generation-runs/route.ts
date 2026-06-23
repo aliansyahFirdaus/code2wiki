@@ -1,5 +1,72 @@
 import { NextResponse } from "next/server";
+import { desc, eq, inArray } from "drizzle-orm";
 
-export function GET() {
-  return NextResponse.json({ generationRuns: [], phase: "phase_1_stub" });
+import { generationRuns, getDb, wikiPages } from "@code2wiki/db";
+import { sanitizeErrorText } from "@code2wiki/shared";
+
+export const dynamic = "force-dynamic";
+
+export async function GET(request: Request) {
+  const workspaceId = new URL(request.url).searchParams.get("workspaceId")?.trim();
+  if (!workspaceId) {
+    return NextResponse.json({ error: { code: "WORKSPACE_ID_REQUIRED", message: "workspaceId is required." } }, { status: 400 });
+  }
+
+  try {
+    const db = getDb();
+    const rows = await db
+      .select()
+      .from(generationRuns)
+      .where(eq(generationRuns.workspaceId, workspaceId))
+      .orderBy(desc(generationRuns.createdAt));
+    const pages =
+      rows.length > 0
+        ? await db.select().from(wikiPages).where(inArray(wikiPages.generationRunId, rows.map((run) => run.id)))
+        : [];
+    const pagesByRun = new Map<string, Array<typeof wikiPages.$inferSelect>>();
+    for (const page of pages) {
+      pagesByRun.set(page.generationRunId, [...(pagesByRun.get(page.generationRunId) ?? []), page]);
+    }
+
+    return NextResponse.json({
+      generationRuns: rows.map((run) => toRunResponse(run, pagesByRun.get(run.id) ?? []))
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: { code: "GENERATION_RUNS_UNAVAILABLE", message: sanitizeErrorText(error) } },
+      { status: 503 }
+    );
+  }
+}
+
+function toRunResponse(run: typeof generationRuns.$inferSelect, pages: Array<typeof wikiPages.$inferSelect>) {
+  return {
+    id: run.id,
+    workspaceId: run.workspaceId,
+    frontendRepositoryId: run.frontendRepositoryId,
+    backendRepositoryId: run.backendRepositoryId,
+    frontendTag: run.frontendTag,
+    frontendCommitSha: run.frontendCommitSha,
+    backendTag: run.backendTag,
+    backendCommitSha: run.backendCommitSha,
+    status: run.status,
+    totalEligibleFiles: run.totalEligibleFiles,
+    indexedEligibleFiles: run.indexedEligibleFiles,
+    frontendTotalEligibleFiles: run.frontendTotalEligibleFiles,
+    frontendIndexedEligibleFiles: run.frontendIndexedEligibleFiles,
+    backendTotalEligibleFiles: run.backendTotalEligibleFiles,
+    backendIndexedEligibleFiles: run.backendIndexedEligibleFiles,
+    generatedStatementCount: run.generatedStatementCount,
+    generatedStatementWithEvidenceCount: run.generatedStatementWithEvidenceCount,
+    errorMessage: run.errorMessage ? sanitizeErrorText(run.errorMessage) : null,
+    startedAt: run.startedAt?.toISOString() ?? null,
+    finishedAt: run.finishedAt?.toISOString() ?? null,
+    createdAt: run.createdAt.toISOString(),
+    wikiPages: pages.map((page) => ({
+      id: page.id,
+      title: page.title,
+      pageKey: page.pageKey,
+      href: `/wiki/${page.id}`
+    }))
+  };
 }

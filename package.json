@@ -3,6 +3,10 @@
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
+    "dev:web": "pnpm --filter @code2wiki/web dev",
+    "db:migrate": "drizzle-kit migrate",
+    "worker:run": "pnpm --filter @code2wiki/worker worker:run",
+    "test": "vitest run packages/analyzer/src/scanner.test.ts packages/ai/src/validate-output.test.ts apps/web/lib/wiki-blocks.test.ts apps/worker/src/index.test.ts",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
@@ -11,6 +15,7 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "drizzle-kit": "^0.30.1",
+    "tsx": "^4.20.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },

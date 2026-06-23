@@ -4,6 +4,8 @@ import { z } from "zod";
 
 import { getDb, githubInstallations, repositories } from "@code2wiki/db";
 
+export const dynamic = "force-dynamic";
+
 const registerRepositorySchema = z
   .object({
     workspaceId: z.string().trim().min(1),

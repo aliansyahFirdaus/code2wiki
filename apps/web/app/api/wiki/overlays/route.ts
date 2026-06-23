@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 
 import { getDb, wikiBlockOverlays, wikiBlocks, wikiPages } from "@code2wiki/db";
-import { createId } from "@code2wiki/shared";
+import { createId, sanitizeErrorText } from "@code2wiki/shared";
 
 import {
   applyEditOverlays,
@@ -27,7 +27,17 @@ type OverlayEdit = {
   text: string;
 };
 
+export const dynamic = "force-dynamic";
+
 export async function POST(request: Request) {
+  try {
+    return await saveOverlays(request);
+  } catch (error) {
+    return NextResponse.json({ error: sanitizeErrorText(error) }, { status: 503 });
+  }
+}
+
+async function saveOverlays(request: Request) {
   const body = (await request.json()) as OverlayRequest;
   const parsed = parseRequest(body);
 

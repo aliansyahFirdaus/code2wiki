@@ -5,6 +5,7 @@ import { generationRuns, getDb, githubInstallations, repositories, tagEvents } f
 import { matchesTagPattern, parseTagWebhookEvent, verifyGitHubWebhookSignature } from "@code2wiki/github";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const secret = process.env.GITHUB_WEBHOOK_SECRET;

@@ -1,16 +1,11 @@
 "use client";
 
-import { EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-
 import type { ProductWikiBlock } from "@code2wiki/document";
 
-import type { TiptapDocument } from "../../lib/wiki-blocks";
 import { BlockRenderer } from "./block-renderer";
 import { EnableEditingButton } from "./enable-editing-button";
 
 type Props = {
-  document: TiptapDocument;
   blocks: ProductWikiBlock[];
   selectedBlockId: string | null;
   onSelectBlock: (block: ProductWikiBlock) => void;
@@ -22,10 +17,10 @@ type Props = {
   onSaveEditing: () => void;
   saving: boolean;
   changedCount: number;
+  saveError: string | null;
 };
 
 export function WikiEditor({
-  document,
   blocks,
   selectedBlockId,
   onSelectBlock,
@@ -36,15 +31,9 @@ export function WikiEditor({
   onCancelEditing,
   onSaveEditing,
   saving,
-  changedCount
+  changedCount,
+  saveError
 }: Props) {
-  const editor = useEditor({
-    extensions: [StarterKit],
-    content: document,
-    editable: false,
-    immediatelyRender: false
-  });
-
   return (
     <section style={{ padding: 24 }}>
       <header style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
@@ -62,7 +51,7 @@ export function WikiEditor({
           <EnableEditingButton onClick={onEnableEditing} />
         )}
       </header>
-      <EditorContent editor={editor} />
+      {saveError ? <p style={{ color: "#b91c1c", margin: "0 0 16px" }}>{saveError}</p> : null}
       <div style={{ display: "grid", gap: 12, marginTop: 24 }}>
         {blocks.map((block) => (
           <BlockRenderer

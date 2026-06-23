@@ -22,18 +22,19 @@ type Props = {
   currentPageId: string;
   pages: WikiPageItem[];
   blocks: ProductWikiBlock[];
-  tiptap: Parameters<typeof WikiEditor>[0]["document"];
   generationRun: GenerationRunSummary | null;
 };
 
-export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generationRun }: Props) {
+export function WikiReaderShell({ currentPageId, pages, blocks, generationRun }: Props) {
   const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [localText, setLocalText] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
   const [loadingEvidence, setLoadingEvidence] = useState(false);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const blockById = useMemo(() => new Map(flattenBlocks(blocks).map((block) => [block.id, block])), [blocks]);
   const changedEdits = useMemo(() => collectChangedEdits(blocks, localText), [blocks, localText]);
 
@@ -43,6 +44,7 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
 
   async function selectBlock(block: ProductWikiBlock) {
     setSelectedBlockId(block.id);
+    setEvidenceError(null);
     if ((block.origin !== "CODE" && block.origin !== "CODE_EDITED") || getEvidenceIds(block).length === 0) {
       setEvidence([]);
       return;
@@ -51,8 +53,14 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
     setLoadingEvidence(true);
     try {
       const response = await fetch(`/api/wiki/blocks/${block.id}/evidence`);
-      const payload = (await response.json()) as { evidence?: EvidenceItem[] };
+      const payload = (await response.json()) as { evidence?: EvidenceItem[]; error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to load sources.");
+      }
       setEvidence(payload.evidence ?? []);
+    } catch (error) {
+      setEvidence([]);
+      setEvidenceError(error instanceof Error ? error.message : "Failed to load sources.");
     } finally {
       setLoadingEvidence(false);
     }
@@ -60,6 +68,7 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
 
   function cancelEditing() {
     setEditing(false);
+    setSaveError(null);
     setLocalText(Object.fromEntries(flattenBlocks(blocks).filter(isEditableBlock).map((block) => [block.id, getEditableText(block)])));
   }
 
@@ -70,6 +79,7 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
     }
 
     setSaving(true);
+    setSaveError(null);
     try {
       const response = await fetch("/api/wiki/overlays", {
         method: "POST",
@@ -82,11 +92,14 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
       });
 
       if (!response.ok) {
-        throw new Error("Failed to save wiki overlays.");
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Failed to save wiki overlays.");
       }
 
       setEditing(false);
       router.refresh();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Failed to save wiki overlays.");
     } finally {
       setSaving(false);
     }
@@ -96,7 +109,6 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
     <main style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr) 320px", minHeight: "100vh" }}>
       <LeftSidebar pages={pages} currentPageId={currentPageId} />
       <WikiEditor
-        document={tiptap}
         blocks={blocks}
         selectedBlockId={selectedBlockId}
         onSelectBlock={selectBlock}
@@ -108,12 +120,14 @@ export function WikiReaderShell({ currentPageId, pages, blocks, tiptap, generati
         onSaveEditing={saveEditing}
         saving={saving}
         changedCount={changedEdits.length}
+        saveError={saveError}
       />
       <RightSidebar
         generationRun={generationRun}
         selectedBlock={selectedBlockId ? blockById.get(selectedBlockId) ?? null : null}
         evidence={evidence}
         loadingEvidence={loadingEvidence}
+        evidenceError={evidenceError}
       />
     </main>
   );

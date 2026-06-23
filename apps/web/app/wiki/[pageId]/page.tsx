@@ -7,6 +7,8 @@ type Props = {
   params: Promise<{ pageId: string }>;
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function WikiPage({ params }: Props) {
   const { pageId } = await params;
   const data = await getWikiReaderData(pageId);
@@ -20,7 +22,6 @@ export default async function WikiPage({ params }: Props) {
       currentPageId={pageId}
       pages={data.pages}
       blocks={data.blocks}
-      tiptap={data.tiptap}
       generationRun={data.generationRun}
     />
   );

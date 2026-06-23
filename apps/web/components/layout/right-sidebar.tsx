@@ -33,9 +33,10 @@ type Props = {
   selectedBlock: ProductWikiBlock | null;
   evidence: EvidenceItem[];
   loadingEvidence: boolean;
+  evidenceError: string | null;
 };
 
-export function RightSidebar({ generationRun, selectedBlock, evidence, loadingEvidence }: Props) {
+export function RightSidebar({ generationRun, selectedBlock, evidence, loadingEvidence, evidenceError }: Props) {
   return (
     <aside style={{ borderLeft: "1px solid #e5e7eb", padding: 16 }}>
       <h2 style={{ fontSize: 14, margin: "0 0 12px" }}>Generation</h2>
@@ -79,6 +80,7 @@ export function RightSidebar({ generationRun, selectedBlock, evidence, loadingEv
         <p style={{ color: "#6b7280", margin: 0 }}>No sources for this block.</p>
       ) : null}
       {loadingEvidence ? <p style={{ color: "#6b7280", margin: 0 }}>Loading sources...</p> : null}
+      {evidenceError ? <p style={{ color: "#b91c1c", margin: 0 }}>{evidenceError}</p> : null}
       {!loadingEvidence && evidence.length > 0 ? (
         <div style={{ display: "grid", gap: 12 }}>
           {evidence.map((item) => (

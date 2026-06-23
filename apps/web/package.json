@@ -2,6 +2,8 @@
   "name": "@code2wiki/web",
   "private": true,
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {
