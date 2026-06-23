@@ -1,8 +1,8 @@
 import { and, eq, inArray } from "drizzle-orm";
 
-import { evidence, generationRuns, getDb, wikiBlocks, wikiPages } from "@code2wiki/db";
+import { evidence, generationRuns, getDb, wikiBlockOverlays, wikiBlocks, wikiPages } from "@code2wiki/db";
 
-import { blocksToTiptap, buildBlockTree } from "./wiki-blocks";
+import { applyEditOverlays, blocksToTiptap, buildBlockTree } from "./wiki-blocks";
 
 export type WikiReaderData = Awaited<ReturnType<typeof getWikiReaderData>>;
 
@@ -14,13 +14,19 @@ export async function getWikiReaderData(pageId: string) {
     return null;
   }
 
-  const [run, pages, blockRows] = await Promise.all([
+  const [run, pages, blockRows, overlayRows] = await Promise.all([
     db.select().from(generationRuns).where(eq(generationRuns.id, page.generationRunId)).limit(1),
     db.select().from(wikiPages).where(eq(wikiPages.workspaceId, page.workspaceId)),
-    db.select().from(wikiBlocks).where(eq(wikiBlocks.pageId, page.id))
+    db.select().from(wikiBlocks).where(eq(wikiBlocks.pageId, page.id)),
+    db.select().from(wikiBlockOverlays).where(eq(wikiBlockOverlays.workspaceId, page.workspaceId))
   ]);
 
-  const blocks = buildBlockTree(blockRows);
+  const blockIds = new Set(blockRows.map((row) => row.id));
+  const stableKeys = new Set(blockRows.map((row) => row.stableKey));
+  const pageOverlays = overlayRows.filter(
+    (overlay) => overlay.targetBlockId && blockIds.has(overlay.targetBlockId) && stableKeys.has(overlay.targetStableKey)
+  );
+  const blocks = applyEditOverlays(buildBlockTree(blockRows), pageOverlays);
 
   return {
     page,

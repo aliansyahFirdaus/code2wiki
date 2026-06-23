@@ -1,5 +1,7 @@
 import type { ProductWikiBlock } from "@code2wiki/document";
 
+export type EditableBlockType = "statement" | "paragraph" | "callout" | "open_question";
+
 export type WikiBlockRow = {
   id: string;
   parentBlockId: string | null;
@@ -32,6 +34,20 @@ export type CoverageInput = {
   total: number;
 };
 
+export type WikiOverlayRow = {
+  id: string;
+  targetStableKey: string;
+  overlayType: "EDIT" | "HIDE" | "ADD_AFTER" | "ADD_CHILD";
+  overlayJson: unknown;
+  createdAt: Date;
+};
+
+export type EditDraft = {
+  targetBlockId: string;
+  targetStableKey: string;
+  text: string;
+};
+
 export function buildBlockTree(rows: WikiBlockRow[]): ProductWikiBlock[] {
   const blocks = new Map<string, ProductWikiBlock>();
   const children = new Map<string | null, WikiBlockRow[]>();
@@ -59,11 +75,29 @@ export function buildBlockTree(rows: WikiBlockRow[]): ProductWikiBlock[] {
   return (children.get(null) ?? []).map((row) => blocks.get(row.id)).filter(isBlock);
 }
 
+export function applyEditOverlays(blocks: ProductWikiBlock[], overlays: WikiOverlayRow[]): ProductWikiBlock[] {
+  const latest = latestEditOverlays(overlays);
+  return blocks.map((block) => applyOverlayToBlock(block, latest));
+}
+
 export function blocksToTiptap(blocks: ProductWikiBlock[]): TiptapDocument {
   return {
     type: "doc",
     content: blocks.flatMap(blockToTiptap)
   };
+}
+
+export function blockBadges(block: ProductWikiBlock): string[] {
+  const badges: string[] = [block.origin];
+
+  if (block.reviewState === "NEEDS_REVIEW" || block.reviewState === "OPEN_QUESTION") {
+    badges.push("NEEDS_REVIEW");
+  }
+  if (getEvidenceIds(block).length > 0) {
+    badges.push(`${getEvidenceIds(block).length} ${getEvidenceIds(block).length === 1 ? "source" : "sources"}`);
+  }
+
+  return badges;
 }
 
 export function sourceBadge(block: ProductWikiBlock): string {
@@ -82,6 +116,42 @@ export function sourceBadge(block: ProductWikiBlock): string {
     return `Code · ${evidenceIds.length} ${evidenceIds.length === 1 ? "source" : "sources"}`;
   }
   return "Code";
+}
+
+export function isEditableBlock(block: ProductWikiBlock): block is ProductWikiBlock & { type: EditableBlockType } {
+  return block.type === "statement" || block.type === "paragraph" || block.type === "callout" || block.type === "open_question";
+}
+
+export function getEditableText(block: ProductWikiBlock): string {
+  if (block.type === "open_question") {
+    return block.question;
+  }
+  if (block.type === "statement" || block.type === "paragraph" || block.type === "callout") {
+    return block.text;
+  }
+  return "";
+}
+
+export function withEditedText(block: ProductWikiBlock, textValue: string): ProductWikiBlock {
+  if (block.type === "open_question") {
+    return { ...block, question: textValue };
+  }
+  if (block.type === "statement" || block.type === "paragraph" || block.type === "callout") {
+    return { ...block, text: textValue };
+  }
+  return block;
+}
+
+export function collectChangedEdits(blocks: ProductWikiBlock[], localText: Record<string, string>): EditDraft[] {
+  return flattenBlocks(blocks)
+    .filter(isEditableBlock)
+    .flatMap((block) => {
+      const textValue = localText[block.id];
+      if (textValue === undefined || textValue === getEditableText(block)) {
+        return [];
+      }
+      return [{ targetBlockId: block.id, targetStableKey: block.stableKey, text: textValue }];
+    });
 }
 
 export function formatCoverage(input: CoverageInput): string {
@@ -145,4 +215,61 @@ function isBlock(value: ProductWikiBlock | undefined): value is ProductWikiBlock
 
 export function getEvidenceIds(block: ProductWikiBlock): string[] {
   return block.evidenceIds ?? [];
+}
+
+export function flattenBlocks(blocks: ProductWikiBlock[]): ProductWikiBlock[] {
+  return blocks.flatMap((block) => [block, ...flattenBlocks(block.children ?? [])]);
+}
+
+function latestEditOverlays(overlays: WikiOverlayRow[]) {
+  const latest = new Map<string, WikiOverlayRow>();
+  for (const overlay of overlays.filter((item) => item.overlayType === "EDIT")) {
+    const current = latest.get(overlay.targetStableKey);
+    if (!current || compareOverlay(overlay, current) > 0) {
+      latest.set(overlay.targetStableKey, overlay);
+    }
+  }
+  return latest;
+}
+
+function compareOverlay(left: WikiOverlayRow, right: WikiOverlayRow) {
+  const byDate = left.createdAt.getTime() - right.createdAt.getTime();
+  return byDate === 0 ? left.id.localeCompare(right.id) : byDate;
+}
+
+function applyOverlayToBlock(block: ProductWikiBlock, latest: Map<string, WikiOverlayRow>): ProductWikiBlock {
+  const children = block.children?.map((child) => applyOverlayToBlock(child, latest));
+  const base = children ? { ...block, children } : { ...block };
+  const overlay = latest.get(block.stableKey);
+  const textValue = readOverlayText(overlay);
+
+  if (!overlay || textValue === null || !isEditableBlock(base)) {
+    return base;
+  }
+
+  return {
+    ...withEditedText(base, textValue),
+    origin: base.origin === "CODE" ? "CODE_EDITED" : base.origin,
+    evidenceIds: getEvidenceIds(base),
+    locked: false
+  } as ProductWikiBlock;
+}
+
+function readOverlayText(overlay: WikiOverlayRow | undefined): string | null {
+  if (!overlay || typeof overlay.overlayJson !== "object" || !overlay.overlayJson) {
+    return null;
+  }
+
+  const block = "block" in overlay.overlayJson ? overlay.overlayJson.block : undefined;
+  if (!block || typeof block !== "object") {
+    return null;
+  }
+
+  if ("question" in block && typeof block.question === "string") {
+    return block.question;
+  }
+  if ("text" in block && typeof block.text === "string") {
+    return block.text;
+  }
+  return null;
 }

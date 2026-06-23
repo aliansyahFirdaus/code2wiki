@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { blocksToTiptap, buildBlockTree, formatCoverage, sourceBadge, type WikiBlockRow } from "./wiki-blocks";
+import {
+  applyEditOverlays,
+  blockBadges,
+  blocksToTiptap,
+  buildBlockTree,
+  collectChangedEdits,
+  formatCoverage,
+  isEditableBlock,
+  sourceBadge,
+  type WikiBlockRow,
+  type WikiOverlayRow
+} from "./wiki-blocks";
 
 describe("wiki block reader helpers", () => {
   it("reconstructs nested blocks by parentBlockId and position", () => {
@@ -53,6 +64,58 @@ describe("wiki block reader helpers", () => {
   it("formats zero denominator coverage as N/A", () => {
     expect(formatCoverage({ indexed: 0, total: 0 })).toBe("N/A");
   });
+
+  it("applies the latest EDIT overlay by createdAt and id", () => {
+    const [block] = buildBlockTree([row({ id: "stmt", stableKey: "stable", type: "statement", evidenceIds: ["ev-1"] })]);
+    const [edited] = applyEditOverlays([block], [
+      overlay({ id: "b", targetStableKey: "stable", text: "Second", createdAt: new Date("2026-01-01T00:00:00Z") }),
+      overlay({ id: "a", targetStableKey: "stable", text: "First", createdAt: new Date("2026-01-01T00:00:00Z") })
+    ]);
+
+    expect(edited.type).toBe("statement");
+    expect(edited.type === "statement" ? edited.text : "").toBe("Second");
+    expect(edited.origin).toBe("CODE_EDITED");
+  });
+
+  it("does not mutate base blocks when applying overlays", () => {
+    const [block] = buildBlockTree([row({ id: "stmt", stableKey: "stable", type: "statement", evidenceIds: ["ev-1"] })]);
+    const original = block.type === "statement" ? block.text : "";
+
+    applyEditOverlays([block], [overlay({ targetStableKey: "stable", text: "Edited" })]);
+
+    expect(block.type === "statement" ? block.text : "").toBe(original);
+    expect(block.origin).toBe("CODE");
+  });
+
+  it("preserves evidence IDs for CODE_EDITED blocks", () => {
+    const [block] = buildBlockTree([row({ id: "stmt", stableKey: "stable", type: "statement", evidenceIds: ["ev-1"] })]);
+    const [edited] = applyEditOverlays([block], [overlay({ targetStableKey: "stable", text: "Edited" })]);
+
+    expect(edited.origin).toBe("CODE_EDITED");
+    expect(edited.evidenceIds).toEqual(["ev-1"]);
+  });
+
+  it("extracts changed local edits only for editable block types", () => {
+    const blocks = buildBlockTree([
+      row({ id: "p", stableKey: "p-key", type: "paragraph", text: "Old" }),
+      row({ id: "h", stableKey: "h-key", type: "heading", text: "Heading", blockJson: { type: "heading", level: 2, text: "Heading" } })
+    ]);
+
+    expect(collectChangedEdits(blocks, { p: "New", h: "Ignored" })).toEqual([
+      { targetBlockId: "p", targetStableKey: "p-key", text: "New" }
+    ]);
+    expect(blocks.map(isEditableBlock)).toEqual([true, false]);
+  });
+
+  it("shows origin, review, and source badges", () => {
+    const [needsReview, manual] = buildBlockTree([
+      row({ id: "edited", origin: "CODE_EDITED", reviewState: "NEEDS_REVIEW", evidenceIds: ["ev-1"] }),
+      row({ id: "manual", origin: "MANUAL", evidenceIds: [] })
+    ]);
+
+    expect(blockBadges(needsReview)).toEqual(["CODE_EDITED", "NEEDS_REVIEW", "1 source"]);
+    expect(blockBadges(manual)).toEqual(["MANUAL"]);
+  });
 });
 
 function row(input: Partial<WikiBlockRow> & { text?: string } = {}): WikiBlockRow {
@@ -74,5 +137,15 @@ function row(input: Partial<WikiBlockRow> & { text?: string } = {}): WikiBlockRo
       (type === "statement"
         ? { type, text: input.text ?? "Statement", confidence: 1, evidenceIds: input.evidenceIds ?? [], lastGeneratedRunId: "run" }
         : { type, text: input.text ?? "Paragraph" })
+  };
+}
+
+function overlay(input: Partial<WikiOverlayRow> & { text?: string } = {}): WikiOverlayRow {
+  return {
+    id: input.id ?? "overlay",
+    targetStableKey: input.targetStableKey ?? "stable",
+    overlayType: input.overlayType ?? "EDIT",
+    overlayJson: input.overlayJson ?? { version: 1, block: { type: "statement", text: input.text ?? "Edited" } },
+    createdAt: input.createdAt ?? new Date("2026-01-01T00:00:00Z")
   };
 }
