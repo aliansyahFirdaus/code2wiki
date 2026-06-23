@@ -4,6 +4,7 @@ import {
   type GenerateProductWikiInput,
   type GenerateProductWikiRepairInput
 } from "./provider";
+import { buildProductWikiMessages, buildProductWikiRepairMessages } from "./product-wiki-prompts";
 
 const productWikiJsonSchema = {
   type: "object",
@@ -86,26 +87,9 @@ export class OpenRouterProvider implements AIProvider {
             schema: productWikiJsonSchema
           }
         },
-        messages: [
-          {
-            role: "system",
-            content:
-              "Generate only structured ProductWikiBlock JSON. Use only provided pageKeys and evidence IDs. Do not output markdown or prose."
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              task: repair
-                ? "Repair the previous output so it satisfies the schema and validation errors."
-                : "Generate product wiki pages from these deterministic facts and evidence.",
-              generationRunId: input.generationRunId,
-              allowedPageKeys: input.pageGroups.map((group) => group.pageKey),
-              pageGroups: input.pageGroups,
-              invalidOutput: repair?.invalidOutput,
-              validationErrors: repair?.validationErrors
-            })
-          }
-        ]
+        messages: repair
+          ? buildProductWikiRepairMessages(input, repair.invalidOutput, repair.validationErrors)
+          : buildProductWikiMessages(input)
       })
     });
 

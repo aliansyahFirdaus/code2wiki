@@ -19,6 +19,7 @@ export const githubInstallationStatusEnum = pgEnum("github_installation_status",
   "REMOVED",
   "UNKNOWN"
 ]);
+export const codeSummaryTypeEnum = pgEnum("code_summary_type", ["FILE", "MODULE"]);
 export const generationRunStatusEnum = pgEnum("generation_run_status", [
   "QUEUED",
   "WAITING_FOR_PAIR",
@@ -169,6 +170,29 @@ export const codeMaps = pgTable(
   },
   (table) => ({
     generationRunUnique: uniqueIndex("code_maps_generation_run_unique").on(table.generationRunId)
+  })
+);
+
+export const codeSummaries = pgTable(
+  "code_summaries",
+  {
+    id: text("id").primaryKey(),
+    generationRunId: text("generation_run_id").notNull(),
+    summaryType: codeSummaryTypeEnum("summary_type").notNull(),
+    cacheKey: text("cache_key").notNull(),
+    sourceHash: text("source_hash").notNull(),
+    inputHash: text("input_hash").notNull(),
+    outputHash: text("output_hash").notNull(),
+    summaryJson: jsonb("summary_json").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    generationRunTypeCacheKeyUnique: uniqueIndex("code_summaries_generation_type_cache_unique").on(
+      table.generationRunId,
+      table.summaryType,
+      table.cacheKey
+    )
   })
 );
 

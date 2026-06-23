@@ -43,6 +43,13 @@
       "when": 1782151000000,
       "tag": "0005_code_maps",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782151500000,
+      "tag": "0006_code_summaries",
+      "breakpoints": true
     }
   ]
 }

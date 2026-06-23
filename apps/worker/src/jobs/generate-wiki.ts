@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { buildRetrievalContexts, type CodeMap, type CodeSummary, type RetrievalContext } from "@code2wiki/analyzer";
 import {
   OpenRouterProvider,
   ProductWikiValidationError,
@@ -9,7 +10,7 @@ import {
   type GenerateProductWikiFact,
   type ProductWikiPageGroup
 } from "@code2wiki/ai";
-import { codeFacts, evidence, generationRuns, getDb, wikiBlocks, wikiPages } from "@code2wiki/db";
+import { codeFacts, codeMaps, codeSummaries, evidence, generationRuns, getDb, wikiBlocks, wikiPages } from "@code2wiki/db";
 import type { ProductWikiBlock, ProductWikiOutput } from "@code2wiki/document";
 import { and, asc, eq, inArray, or } from "drizzle-orm";
 
@@ -35,11 +36,25 @@ export async function generateWiki(generationRunId?: string): Promise<GenerateWi
   let pageGroups: ProductWikiPageGroup[] = [];
 
   try {
-    const [factRows, evidenceRows] = await Promise.all([
+    const [factRows, evidenceRows, codeMapRows, summaryRows] = await Promise.all([
       db.select().from(codeFacts).where(eq(codeFacts.generationRunId, run.id)),
-      db.select().from(evidence).where(eq(evidence.generationRunId, run.id))
+      db.select().from(evidence).where(eq(evidence.generationRunId, run.id)),
+      db.select().from(codeMaps).where(eq(codeMaps.generationRunId, run.id)),
+      db.select().from(codeSummaries).where(eq(codeSummaries.generationRunId, run.id))
     ]);
-    pageGroups = fitPageGroupsForDemo(buildPageGroups(factRows, evidenceRows));
+    const fallbackPageGroups = buildPageGroups(factRows, evidenceRows);
+    const retrieval = buildRetrievalContexts({
+      generationRunId: run.id,
+      pageKeys: fallbackPageGroups.map((group) => group.pageKey),
+      facts: factRows,
+      evidence: evidenceRows,
+      codeMap: (codeMapRows[0]?.mapJson as CodeMap | undefined) ?? null,
+      summaries: summaryRows.map((row) => row.summaryJson as CodeSummary)
+    });
+    if (retrieval.usedFallback) {
+      console.warn(`Wiki retrieval fallback for ${run.id}: ${retrieval.retrievalWarnings.join(",")}`);
+    }
+    pageGroups = fitPageGroupsForDemo(retrieval.usedFallback ? fallbackPageGroups : pageGroupsFromRetrievalContexts(retrieval.contexts, evidenceRows));
 
     if (pageGroups.length === 0) {
       await markInvalid(run.id, "NO_FACTS_FOR_GENERATION");
@@ -222,6 +237,79 @@ function fitPageGroupsForDemo(pageGroups: ProductWikiPageGroup[]): ProductWikiPa
     })
     .filter((group) => group.facts.length > 0 && group.evidence.length > 0)
     .sort((left, right) => left.pageKey.localeCompare(right.pageKey));
+}
+
+function pageGroupsFromRetrievalContexts(
+  contexts: RetrievalContext[],
+  evidenceRows: Array<typeof evidence.$inferSelect>
+): ProductWikiPageGroup[] {
+  const evidenceById = new Map(evidenceRows.map((row) => [row.id, toProviderEvidence(row)]));
+  return contexts
+    .map((context) => {
+      const evidenceIds = new Set(context.evidence.map((item) => item.id));
+      const facts = [
+        ...context.facts.map((fact) => ({
+          id: fact.id,
+          repositoryRole: fact.repositoryRole,
+          repositoryFullName: fact.repositoryFullName,
+          tag: fact.tag,
+          commitSha: fact.commitSha,
+          factKind: fact.factKind,
+          text: fact.text,
+          evidenceIds: fact.evidenceIds.filter((id) => evidenceIds.has(id)),
+          confidence: fact.confidence
+        })),
+        ...retrievalSyntheticFacts(context, evidenceById)
+      ].filter((fact) => fact.evidenceIds.length > 0);
+
+      return {
+        pageKey: context.pageKey,
+        title: titleFromPageKey(context.pageKey),
+        facts,
+        evidence: context.evidence.map((item) => evidenceById.get(item.id)).filter(isDefined)
+      } satisfies ProductWikiPageGroup;
+    })
+    .filter((group) => group.facts.length > 0 && group.evidence.length > 0)
+    .sort((left, right) => left.pageKey.localeCompare(right.pageKey));
+}
+
+function retrievalSyntheticFacts(context: RetrievalContext, evidenceById: Map<string, GenerateProductWikiEvidence>): GenerateProductWikiFact[] {
+  const fact = (id: string, factKind: string, text: string, evidenceIds: string[], confidence = 0.8): GenerateProductWikiFact | null => {
+    const evidence = evidenceIds.map((evidenceId) => evidenceById.get(evidenceId)).filter(isDefined);
+    const firstEvidence = evidence[0];
+    if (!firstEvidence) {
+      return null;
+    }
+    return {
+      id,
+      repositoryRole: firstEvidence.repositoryRole,
+      repositoryFullName: firstEvidence.repositoryFullName,
+      tag: firstEvidence.tag,
+      commitSha: firstEvidence.commitSha,
+      factKind,
+      text,
+      evidenceIds: evidence.map((item) => item.id),
+      confidence
+    };
+  };
+
+  return [
+    ...context.summaries.flatMap((summary) =>
+      summary.claims.map((claim, index) =>
+        fact(`retrieval_summary_${hash(`${summary.cacheKey}:${index}:${claim.text}`)}`, `SUMMARY_${summary.type}`, claim.text, claim.evidenceIds, confidenceScore(claim.confidence))
+      )
+    ),
+    ...[...context.frontend.nodes, ...context.backend.nodes].map((node) =>
+      fact(`retrieval_node_${node.stableKey}`, `CODE_MAP_${node.kind}`, `${node.kind}: ${node.label}`, node.evidenceIds, confidenceScore(node.confidence))
+    ),
+    ...context.crossRepoLinks.map((edge) =>
+      fact(`retrieval_edge_${edge.stableKey}`, `CODE_MAP_${edge.kind}`, `${edge.kind}: ${edge.fromStableKey} -> ${edge.toStableKey}`, edge.evidenceIds, confidenceScore(edge.confidence))
+    )
+  ].filter(isDefined);
+}
+
+function confidenceScore(confidence: string) {
+  return confidence === "HIGH" ? 0.95 : confidence === "MEDIUM" ? 0.8 : confidence === "LOW" ? 0.6 : 0.3;
 }
 
 function buildDeterministicWikiOutput(
@@ -469,6 +557,6 @@ function hash(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
-function isDefined<T>(value: T | undefined): value is T {
-  return value !== undefined;
+function isDefined<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
 }

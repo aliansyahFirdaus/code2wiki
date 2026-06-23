@@ -1,7 +1,7 @@
-import { buildCodeMap, scanCode, type ScannerEvidence } from "@code2wiki/analyzer";
-import { codeFacts, codeMaps, evidence as evidenceTable, generationRuns, getDb, repositories } from "@code2wiki/db";
+import { buildCodeMap, buildCodeSummaries, scanCode, type ScannerEvidence } from "@code2wiki/analyzer";
+import { codeFacts, codeMaps, codeSummaries, evidence as evidenceTable, generationRuns, getDb, repositories } from "@code2wiki/db";
 import { cloneRepositoryAtCommit, createGitHubInstallationAccessToken, type RepositoryCheckout } from "@code2wiki/github";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { assertGenerationRepositoryRoles, mapScanCoverage, type ScanCoverage } from "./role-mapping";
 
 type AnalyzeCodeResult =
@@ -180,6 +180,41 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
             updatedAt: new Date()
           }
         });
+
+      const summaries = buildCodeSummaries({
+        generationRunId: claimedRun.id,
+        codeMap,
+        facts: codeFactRows,
+        evidence: evidenceRows.map(({ evidenceKey, codeSnippet, ...row }) => row)
+      });
+      const summaryRows = [...summaries.fileSummaries, ...summaries.moduleSummaries].map((summary) => ({
+        id: `code_summary_${summary.type.toLowerCase()}_${summary.cacheKey}`,
+        generationRunId: claimedRun.id,
+        summaryType: summary.type,
+        cacheKey: summary.cacheKey,
+        sourceHash: summary.sourceHash,
+        inputHash: summary.inputHash,
+        outputHash: summary.outputHash,
+        summaryJson: summary as unknown as Record<string, unknown>,
+        updatedAt: new Date()
+      }));
+
+      await tx.delete(codeSummaries).where(eq(codeSummaries.generationRunId, claimedRun.id));
+      if (summaryRows.length > 0) {
+        await tx
+          .insert(codeSummaries)
+          .values(summaryRows)
+          .onConflictDoUpdate({
+            target: [codeSummaries.generationRunId, codeSummaries.summaryType, codeSummaries.cacheKey],
+            set: {
+              sourceHash: sql`excluded.source_hash`,
+              inputHash: sql`excluded.input_hash`,
+              outputHash: sql`excluded.output_hash`,
+              summaryJson: sql`excluded.summary_json`,
+              updatedAt: new Date()
+            }
+          });
+      }
 
       await tx
         .update(generationRuns)
