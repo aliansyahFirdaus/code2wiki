@@ -64,7 +64,7 @@ describe("coverage evaluator", () => {
 
     const result = await evaluateCoverage(run(), task());
 
-    expect(result).toMatchObject({ ok: true, queuedTaskDedupeKeys: ["create-page:users"] });
+    expect(result).toMatchObject({ ok: true, queuedTaskDedupeKeys: ["create-page:users"], report: { counts: { routedGaps: 1, unroutedGaps: 0 } } });
     expect(db.tasks).toMatchObject([{ taskType: "CREATE_PAGE", pageKey: "users", dedupeKey: "create-page:users" }]);
   });
 
@@ -77,8 +77,9 @@ describe("coverage evaluator", () => {
     });
     mocks.getDb.mockReturnValue(db);
 
-    await evaluateCoverage(run(), task());
+    const result = await evaluateCoverage(run(), task());
 
+    expect(result).toMatchObject({ ok: true, report: { counts: { routedGaps: 1, unroutedGaps: 0 } } });
     expect(db.tasks).toMatchObject([{ taskType: "UPDATE_PAGE", pageKey: "users", dedupeKey: "update-page:users" }]);
   });
 
@@ -93,7 +94,7 @@ describe("coverage evaluator", () => {
 
     const result = await evaluateCoverage(run(), task());
 
-    expect(result).toMatchObject({ ok: true, queuedTaskDedupeKeys: [], report: { counts: { queuedTasks: 0 } } });
+    expect(result).toMatchObject({ ok: true, queuedTaskDedupeKeys: [], report: { counts: { queuedTasks: 0, routedGaps: 1, unroutedGaps: 0 } } });
     expect(db.tasks).toHaveLength(1);
   });
 
@@ -107,7 +108,7 @@ describe("coverage evaluator", () => {
 
     const result = await evaluateCoverage(run(), task());
 
-    expect(result).toMatchObject({ ok: true, queuedTaskDedupeKeys: ["update-page:users"] });
+    expect(result).toMatchObject({ ok: true, queuedTaskDedupeKeys: ["update-page:users"], report: { counts: { routedGaps: 1, unroutedGaps: 0 } } });
     expect(db.tasks).toMatchObject([{ taskType: "UPDATE_PAGE", pageKey: "users", dedupeKey: "update-page:users" }]);
     expect(db.pageEvidence).toHaveLength(0);
   });
@@ -118,7 +119,7 @@ describe("coverage evaluator", () => {
 
     const result = await evaluateCoverage(run(), task());
 
-    expect(result).toMatchObject({ ok: true, report: { acceptable: true } });
+    expect(result).toMatchObject({ ok: true, report: { acceptable: true, counts: { routedGaps: 1, unroutedGaps: 0 } } });
     expect(db.pageEvidence).toMatchObject([{ evidenceId: "ev-style", coverageRole: "EXCLUDED_NO_WIKI_VALUE" }]);
   });
 
@@ -128,9 +129,25 @@ describe("coverage evaluator", () => {
 
     const result = await evaluateCoverage(run(), task());
 
-    expect(result).toMatchObject({ ok: true, report: { acceptable: false } });
+    expect(result).toMatchObject({ ok: true, report: { acceptable: false, counts: { routedGaps: 1, unroutedGaps: 0 } } });
     expect(db.pageEvidence).toMatchObject([{ coverageRole: "NEEDS_REVIEW" }]);
     expect(db.debugEvents.some((event) => event.eventType === "COVERAGE_NEEDS_REVIEW")).toBe(true);
+  });
+
+  it("fails instead of silently skipping an unrouted frontend coverage gap", async () => {
+    const db = new FakeDb({
+      facts: [fact()],
+      evidence: [evidenceRow()],
+      codeMaps: [codeMap([uiRoute("/users")])],
+      dropTaskInserts: true
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    const result = await evaluateCoverage(run(), task());
+
+    expect(result).toEqual({ ok: false, errorMessage: "COVERAGE_GAP_UNROUTED" });
+    expect(db.debugEvents.some((event) => event.eventType === "COVERAGE_GAP_UNROUTED")).toBe(true);
+    expect(db.runs[0].coverageReportJson).toBeNull();
   });
 
   it("rerunning evaluator does not create new fingerprint churn from negative rows", async () => {
@@ -244,7 +261,10 @@ class FakeDb {
   tasks: any[] = [];
   debugEvents: any[] = [];
 
-  constructor(input: { codeMaps?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; pages?: any[]; tasks?: any[]; debugEvents?: any[] }) {
+  dropTaskInserts: boolean;
+  dropPageEvidenceInserts: boolean;
+
+  constructor(input: { codeMaps?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; pages?: any[]; tasks?: any[]; debugEvents?: any[]; dropTaskInserts?: boolean; dropPageEvidenceInserts?: boolean }) {
     this.codeMaps = input.codeMaps ?? [];
     this.facts = input.facts ?? [];
     this.evidence = input.evidence ?? [];
@@ -252,6 +272,8 @@ class FakeDb {
     this.pages = input.pages ?? [];
     this.tasks = input.tasks ?? [];
     this.debugEvents = input.debugEvents ?? [];
+    this.dropTaskInserts = input.dropTaskInserts ?? false;
+    this.dropPageEvidenceInserts = input.dropPageEvidenceInserts ?? false;
   }
 
   select() {
@@ -325,6 +347,7 @@ class InsertBuilder {
     const run = async () => {
       const inserted: Record<string, unknown>[] = [];
       if (this.table === mocks.generationTasks) {
+        if (this.db.dropTaskInserts) return inserted;
         for (const row of rows) {
           if (!this.db.tasks.some((task) => task.generationRunId === row.generationRunId && task.dedupeKey === row.dedupeKey)) {
             this.db.tasks.push(row);
@@ -333,6 +356,7 @@ class InsertBuilder {
         }
       }
       if (this.table === mocks.wikiPageEvidence) {
+        if (this.db.dropPageEvidenceInserts) return inserted;
         for (const row of rows) {
           if (!this.db.pageEvidence.some((item) => item.id === row.id)) {
             this.db.pageEvidence.push(row);

@@ -50,6 +50,8 @@ export type CoverageReport = {
     uncovered: number;
     queuedTasks: number;
     reviewGaps: number;
+    routedGaps: number;
+    unroutedGaps: number;
   };
   gaps: CoverageGap[];
   queuedTaskDedupeKeys: string[];
@@ -115,7 +117,33 @@ export async function evaluateCoverage(run: GenerationRun, task: GenerationTask)
       }
     }
 
-    const report = { ...evaluation.report, counts: { ...evaluation.report.counts, queuedTasks: queuedTaskDedupeKeys.length }, queuedTaskDedupeKeys };
+    const [taskRows, pageEvidenceRows] = await Promise.all([
+      db.select().from(generationTasks).where(eq(generationTasks.generationRunId, run.id)),
+      db.select().from(wikiPageEvidence).where(eq(wikiPageEvidence.generationRunId, run.id))
+    ]);
+    const audit = auditCoverageRoutes(run.id, evaluation.gaps, taskRows, pageEvidenceRows);
+    if (audit.unrouted.length > 0) {
+      await emitDebugEvent({
+        generationRunId: run.id,
+        stage: "coverage",
+        eventType: "COVERAGE_GAP_UNROUTED",
+        severity: "ERROR",
+        message: "Coverage evaluation found unrouted evidence.",
+        payload: { unroutedGaps: audit.unrouted }
+      });
+      return { ok: false, errorMessage: "COVERAGE_GAP_UNROUTED" };
+    }
+
+    const report = {
+      ...evaluation.report,
+      counts: {
+        ...evaluation.report.counts,
+        queuedTasks: queuedTaskDedupeKeys.length,
+        routedGaps: audit.routed.length,
+        unroutedGaps: audit.unrouted.length
+      },
+      queuedTaskDedupeKeys
+    };
     await db.update(generationRuns).set({ coverageReportJson: report, errorMessage: null }).where(eq(generationRuns.id, run.id));
     await emitDebugEvent({
       generationRunId: run.id,
@@ -169,7 +197,9 @@ function buildCoverageReport(input: CoverageInput) {
       terminalNegativeCoverage: terminalNegativeKeys.size,
       uncovered: uncovered.length,
       queuedTasks: queued,
-      reviewGaps
+      reviewGaps,
+      routedGaps: 0,
+      unroutedGaps: gaps.length
     },
     gaps,
     queuedTaskDedupeKeys: [],
@@ -227,9 +257,29 @@ function classifyGap(item: CoverageItem, nodes: CodeMapNode[], existingPageKeys:
   };
 }
 
+function auditCoverageRoutes(generationRunId: string, gaps: CoverageGap[], tasks: GenerationTask[], pageEvidenceRows: WikiPageEvidence[]) {
+  const routed: CoverageGap[] = [];
+  const unrouted: CoverageGap[] = [];
+  for (const gap of gaps) {
+    const ok = isWritableGap(gap)
+      ? tasks.some((task) => task.generationRunId === generationRunId && task.dedupeKey === pageTaskDedupeKey(gap))
+      : pageEvidenceRows.some((row) => row.id === wikiPageEvidenceId(generationRunId, gap.pageKey, gap.evidenceId, gap.factId, gap.disposition));
+    (ok ? routed : unrouted).push(gap);
+  }
+  return { routed, unrouted };
+}
+
+function isWritableGap(gap: CoverageGap) {
+  return gap.disposition === "CREATE_PAGE" || gap.disposition === "UPDATE_PAGE";
+}
+
+function pageTaskDedupeKey(gap: CoverageGap) {
+  return `${gap.disposition === "UPDATE_PAGE" ? "update" : "create"}-page:${gap.pageKey}`;
+}
+
 function pageTasksForGaps(run: GenerationRun, gaps: CoverageGap[]) {
   const byPage = new Map<string, CoverageGap[]>();
-  for (const gap of gaps.filter((item) => item.disposition === "CREATE_PAGE" || item.disposition === "UPDATE_PAGE")) {
+  for (const gap of gaps.filter(isWritableGap)) {
     byPage.set(gap.pageKey, [...(byPage.get(gap.pageKey) ?? []), gap]);
   }
   return [...byPage.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([pageKey, pageGaps]) => {
