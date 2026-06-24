@@ -61,6 +61,15 @@ describe("analyzeCode code map persistence", () => {
     delete process.env.CODE2WIKI_SCAN_KEYWORDS;
   });
 
+  it("does not return scan warnings when keyword env is unset", async () => {
+    const db = {
+      update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([]) })) })) }))
+    };
+    mocks.getDb.mockReturnValue(db);
+
+    await expect(analyzeCode("run-1")).resolves.not.toHaveProperty("scanWarnings");
+  });
+
   it("upserts one code_maps row for the generation run", async () => {
     process.env.CODE2WIKI_SCAN_KEYWORDS = " payroll, Vessel ";
     const run = {
@@ -128,7 +137,11 @@ describe("analyzeCode code map persistence", () => {
     };
     mocks.getDb.mockReturnValue(db);
 
-    await expect(analyzeCode("run-1")).resolves.toMatchObject({ status: "facts_extracted", generationRunId: "run-1" });
+    await expect(analyzeCode("run-1")).resolves.toMatchObject({
+      status: "facts_extracted",
+      generationRunId: "run-1",
+      scanWarnings: ["SCAN_KEYWORDS_ACTIVE: generation is scoped to keywords [payroll, Vessel]; coverage is not full-repository coverage."]
+    });
 
     expect(mocks.scanCode).toHaveBeenNthCalledWith(1, {
       repositoryRole: "FRONTEND",

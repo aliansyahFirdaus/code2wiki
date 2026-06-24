@@ -5,7 +5,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { assertGenerationRepositoryRoles, mapScanCoverage, type ScanCoverage } from "./role-mapping";
 
 type AnalyzeCodeResult =
-  | { status: "skipped"; reason: string }
+  | { status: "skipped"; reason: string; scanWarnings?: string[] }
   | {
       status: "facts_extracted";
       generationRunId: string;
@@ -15,21 +15,24 @@ type AnalyzeCodeResult =
       frontendIndexedEligibleFiles: number;
       backendTotalEligibleFiles: number;
       backendIndexedEligibleFiles: number;
+      scanWarnings?: string[];
     }
-  | { status: "failed"; generationRunId: string; errorMessage: string };
+  | { status: "failed"; generationRunId: string; errorMessage: string; scanWarnings?: string[] };
 
 type ClaimedGenerationRun = typeof generationRuns.$inferSelect;
 type RepositoryRecord = typeof repositories.$inferSelect;
 
 export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCodeResult> {
   const db = getDb();
+  const keywordFilter = scanKeywordFilterFromEnv();
+  const scanWarnings = scanWarningsForKeywordFilter(keywordFilter);
   const claimedRun = await claimGenerationRun(generationRunId);
 
   if (!claimedRun) {
-    return {
+    return withScanWarnings({
       status: "skipped",
       reason: generationRunId ? "Generation run is not cloned or does not exist." : "No cloned generation run found."
-    };
+    }, scanWarnings);
   }
 
   const checkouts: RepositoryCheckout[] = [];
@@ -69,7 +72,6 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
     });
     checkouts.push(backendCheckout);
 
-    const keywordFilter = scanKeywordFilterFromEnv();
     const [frontendScan, backendScan] = await Promise.all([
       scanCode({
         repositoryRole: frontendRepository.role,
@@ -100,7 +102,7 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
 
     if (totalEligibleFiles === 0) {
       await markNoEligibleFiles(claimedRun.id, coverage);
-      return { status: "failed", generationRunId: claimedRun.id, errorMessage: "NO_ELIGIBLE_FILES" };
+      return withScanWarnings({ status: "failed", generationRunId: claimedRun.id, errorMessage: "NO_ELIGIBLE_FILES" }, scanWarnings);
     }
 
     const evidenceRows = [
@@ -238,7 +240,7 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
         .where(eq(generationRuns.id, claimedRun.id));
     });
 
-    return {
+    return withScanWarnings({
       status: "facts_extracted",
       generationRunId: claimedRun.id,
       totalEligibleFiles,
@@ -247,15 +249,15 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
       frontendIndexedEligibleFiles: coverage.frontendIndexedEligibleFiles,
       backendTotalEligibleFiles: coverage.backendTotalEligibleFiles,
       backendIndexedEligibleFiles: coverage.backendIndexedEligibleFiles
-    };
+    }, scanWarnings);
   } catch (error) {
     const errorMessage = sanitizeErrorMessage(error);
     await markFailed(claimedRun.id, errorMessage);
-    return {
+    return withScanWarnings({
       status: "failed",
       generationRunId: claimedRun.id,
       errorMessage
-    };
+    }, scanWarnings);
   } finally {
     await cleanupCheckouts(checkouts);
   }
@@ -423,6 +425,16 @@ function scanKeywordFilterFromEnv() {
     .split(",")
     .map((keyword) => keyword.trim())
     .filter(Boolean);
+}
+
+function scanWarningsForKeywordFilter(keywords: string[]) {
+  return keywords.length > 0
+    ? [`SCAN_KEYWORDS_ACTIVE: generation is scoped to keywords [${keywords.join(", ")}]; coverage is not full-repository coverage.`]
+    : [];
+}
+
+function withScanWarnings<T extends object>(result: T, warnings: string[]): T & { scanWarnings?: string[] } {
+  return warnings.length > 0 ? { ...result, scanWarnings: warnings } : result;
 }
 
 async function cleanupCheckouts(checkouts: RepositoryCheckout[]) {
