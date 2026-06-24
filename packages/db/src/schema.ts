@@ -41,6 +41,7 @@ export const overlayTypeEnum = pgEnum("overlay_type", ["EDIT", "HIDE", "ADD_AFTE
 export const generationTaskTypeEnum = pgEnum("generation_task_type", [
   "DISCOVER_SURFACE",
   "TRACE_BEHAVIOR",
+  "DISCOVER_RELATED_CONCEPTS",
   "CREATE_PAGE",
   "UPDATE_PAGE",
   "EVALUATE_COVERAGE"

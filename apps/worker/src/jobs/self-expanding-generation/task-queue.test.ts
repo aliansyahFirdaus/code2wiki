@@ -36,6 +36,8 @@ const mocks = vi.hoisted(() => ({
     generationRunId: "wiki_run_pages.generation_run_id",
     pageKey: "wiki_run_pages.page_key"
   },
+  deriveProductConcepts: vi.fn(),
+  matchConceptsToPages: vi.fn(),
   writePageTask: vi.fn()
 }));
 
@@ -62,6 +64,11 @@ vi.mock("@code2wiki/db", () => ({
   wikiRunPages: mocks.wikiRunPages
 }));
 
+vi.mock("@code2wiki/analyzer", () => ({
+  deriveProductConcepts: mocks.deriveProductConcepts,
+  matchConceptsToPages: mocks.matchConceptsToPages
+}));
+
 vi.mock("./page-writer", () => ({
   writePageTask: mocks.writePageTask
 }));
@@ -69,6 +76,8 @@ vi.mock("./page-writer", () => ({
 describe("self-expanding generation task queue", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.deriveProductConcepts.mockReturnValue([]);
+    mocks.matchConceptsToPages.mockReturnValue([]);
     mocks.writePageTask.mockImplementation(async (run: any, task: any) => {
       const db = mocks.getDb();
       db.runPages.push({ generationRunId: run.id, workspaceId: run.workspaceId, pageId: `page-${task.pageKey}`, pageKey: task.pageKey, materializationType: "WRITTEN" });
@@ -94,7 +103,7 @@ describe("self-expanding generation task queue", () => {
 
     expect(result).toMatchObject({ status: "tasks_processed", generationRunId: "run-1", written: 1, failed: 0 });
     expect(db.runs[0].status).toBe("COMPLETED");
-    expect(db.tasks.map((task) => task.taskType)).toEqual(["DISCOVER_SURFACE", "TRACE_BEHAVIOR", "CREATE_PAGE", "EVALUATE_COVERAGE"]);
+    expect(db.tasks.map((task) => task.taskType)).toEqual(["DISCOVER_SURFACE", "TRACE_BEHAVIOR", "CREATE_PAGE", "DISCOVER_RELATED_CONCEPTS", "EVALUATE_COVERAGE"]);
     expect(db.wikiPages).toHaveLength(0);
     expect(db.wikiBlocks).toHaveLength(0);
   });
@@ -121,6 +130,7 @@ describe("self-expanding generation task queue", () => {
   it("resumes AI_GENERATING when stale IN_PROGRESS can retry", async () => {
     const db = new FakeDb({
       runs: [run("AI_GENERATING")],
+      codeMaps: [codeMap([])],
       tasks: [task({ status: "IN_PROGRESS", claimedAt: new Date(Date.now() - 16 * 60 * 1000) })],
       wikiPages: [{ workspaceId: "workspace-1", pageKey: "users" }]
     });
@@ -156,6 +166,7 @@ describe("self-expanding generation task queue", () => {
     expect(db.tasks.filter((task) => task.dedupeKey === "discover-surface:users")).toHaveLength(1);
     expect(db.tasks.filter((task) => task.dedupeKey === "trace-behavior:users")).toHaveLength(1);
     expect(db.tasks.filter((task) => task.dedupeKey === "create-page:users")).toHaveLength(1);
+    expect(db.tasks.filter((task) => String(task.dedupeKey).startsWith("discover-related:") && String(task.dedupeKey).endsWith(":users:depth-1"))).toHaveLength(1);
     expect(db.debugEvents.filter((event) => event.eventType === "TASK_QUEUED" && event.payloadJson.dedupeKey === "discover-surface:users")).toHaveLength(1);
   });
 
@@ -167,6 +178,88 @@ describe("self-expanding generation task queue", () => {
 
     expect(db.tasks.find((task) => task.taskType === "DISCOVER_SURFACE")).toMatchObject({ status: "SUCCEEDED", branchState: "FOUND_CHILDREN" });
     expect(db.tasks.find((task) => task.taskType === "TRACE_BEHAVIOR")).toMatchObject({ status: "SUCCEEDED", branchState: "WAITING_RELATED_BRANCH" });
+  });
+
+  it("queues related discovery from traced behavior", async () => {
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      codeMaps: [codeMap([])],
+      tasks: [task({ id: "trace-1", taskType: "TRACE_BEHAVIOR", pageKey: "payroll", rootTaskId: "root-1", dedupeKey: "trace-behavior:payroll" })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(db.tasks.find((item) => item.taskType === "DISCOVER_RELATED_CONCEPTS")).toMatchObject({
+      dedupeKey: "discover-related:root-1:payroll:depth-1",
+      payloadJson: { depth: 1, sourcePageKey: "payroll" }
+    });
+    expect(db.tasks.find((item) => item.id === "trace-1")).toMatchObject({
+      status: "SUCCEEDED",
+      resultJson: { queued: ["create-page:payroll", "discover-related:root-1:payroll:depth-1"] }
+    });
+  });
+
+  it("DISCOVER_RELATED_CONCEPTS queues CREATE_PAGE and UPDATE_PAGE decisions", async () => {
+    mocks.deriveProductConcepts.mockReturnValue([{ conceptKey: "salary-component", evidenceIds: ["evidence-1"] }]);
+    mocks.matchConceptsToPages.mockReturnValue([
+      conceptDecision({ disposition: "CREATE_PAGE", pageKey: "payroll.salary-component", conceptKey: "salary-component" }),
+      conceptDecision({ disposition: "UPDATE_PAGE", pageKey: "vessel", conceptKey: "vessel", reason: "existing page matched concept" })
+    ]);
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      facts: [fact()],
+      evidence: [evidenceRow()],
+      codeMaps: [codeMap([])],
+      wikiPages: [{ workspaceId: "workspace-1", pageKey: "vessel" }],
+      tasks: [task({ taskType: "DISCOVER_RELATED_CONCEPTS", pageKey: "payroll", dedupeKey: "discover-related:root-1:payroll:depth-1", payloadJson: { depth: 1, sourcePageKey: "payroll" } })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(mocks.deriveProductConcepts).toHaveBeenCalledWith(expect.objectContaining({ facts: db.facts, evidence: db.evidence }));
+    expect(mocks.matchConceptsToPages).toHaveBeenCalledWith(expect.objectContaining({ existingPageKeys: ["vessel"], sourcePageKey: "payroll" }));
+    expect(db.tasks.some((item) => item.taskType === "CREATE_PAGE" && item.pageKey === "payroll.salary-component")).toBe(true);
+    expect(db.tasks.some((item) => item.taskType === "UPDATE_PAGE" && item.pageKey === "vessel")).toBe(true);
+    expect(db.tasks[0]).toMatchObject({ status: "SUCCEEDED", branchState: "FOUND_CHILDREN" });
+  });
+
+  it("DISCOVER_RELATED_CONCEPTS records review decisions without creating page tasks", async () => {
+    mocks.matchConceptsToPages.mockReturnValue([
+      conceptDecision({ disposition: "NEEDS_REVIEW", pageKey: "payroll.bonus", conceptKey: "bonus", reason: "concept confidence is LOW" }),
+      conceptDecision({ disposition: "EXCLUDED_NO_WIKI_VALUE", pageKey: "route", conceptKey: "route", evidenceIds: [], reason: "concept is implementation-only" })
+    ]);
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      codeMaps: [codeMap([])],
+      tasks: [task({ taskType: "DISCOVER_RELATED_CONCEPTS", pageKey: "payroll", dedupeKey: "discover-related:root-1:payroll:depth-1", payloadJson: { depth: 1, sourcePageKey: "payroll" } })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(db.tasks.filter((item) => item.parentTaskId === "task-1" && (item.taskType === "CREATE_PAGE" || item.taskType === "UPDATE_PAGE"))).toHaveLength(0);
+    expect(db.tasks[0]).toMatchObject({
+      status: "NEEDS_REVIEW",
+      resultJson: { reason: "RELATED_CONCEPTS_NEED_REVIEW" }
+    });
+  });
+
+  it("DISCOVER_RELATED_CONCEPTS stops at max depth", async () => {
+    mocks.matchConceptsToPages.mockReturnValue([conceptDecision({ disposition: "CREATE_PAGE", pageKey: "payroll.monthly", conceptKey: "monthly" })]);
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      codeMaps: [codeMap([])],
+      tasks: [task({ taskType: "DISCOVER_RELATED_CONCEPTS", pageKey: "payroll", dedupeKey: "discover-related:root-1:payroll:depth-2", payloadJson: { depth: 2, sourcePageKey: "payroll" } })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(mocks.deriveProductConcepts).not.toHaveBeenCalled();
+    expect(db.tasks.filter((item) => item.parentTaskId === "task-1" && (item.taskType === "CREATE_PAGE" || item.taskType === "UPDATE_PAGE"))).toHaveLength(0);
+    expect(db.tasks[0]).toMatchObject({ status: "SUCCEEDED", resultJson: { stopped: "MAX_DEPTH" } });
   });
 
   it("marks backend-only work as NEEDS_REVIEW", async () => {
@@ -434,6 +527,17 @@ function runPage(overrides: Partial<Record<string, unknown>> = {}) {
     materializationType: "WRITTEN",
     sourceGenerationRunId: null,
     inputHash: null,
+    ...overrides
+  };
+}
+
+function conceptDecision(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    disposition: "CREATE_PAGE",
+    pageKey: "payroll.salary-component",
+    conceptKey: "salary-component",
+    evidenceIds: ["evidence-1"],
+    reason: "new concept page under source namespace",
     ...overrides
   };
 }

@@ -1,4 +1,5 @@
-import { codeMaps, generationRuns, generationTasks, getDb, wikiPages } from "@code2wiki/db";
+import { deriveProductConcepts, matchConceptsToPages, type CodeMap, type ConceptPageDecision } from "@code2wiki/analyzer";
+import { codeFacts, codeMaps, evidence as evidenceTable, generationRuns, generationTasks, getDb, wikiPages } from "@code2wiki/db";
 import { and, asc, eq, or, sql } from "drizzle-orm";
 import { currentCoverageFingerprint, evaluateCoverage } from "./coverage-evaluator";
 import { emitDebugEvent } from "./debug-events";
@@ -7,6 +8,7 @@ import { writePageTask } from "./page-writer";
 
 const STALE_IN_PROGRESS_MS = 15 * 60 * 1000;
 const FRONTEND_SURFACE_KINDS = new Set(["UI_ROUTE", "REACT_COMPONENT", "NAVIGATION"]);
+const MAX_RELATED_DISCOVERY_DEPTH = 2;
 
 type GenerationRun = typeof generationRuns.$inferSelect;
 type GenerationTask = typeof generationTasks.$inferSelect;
@@ -298,7 +300,8 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
   if (task.taskType === "TRACE_BEHAVIOR") {
     const writeType = (await pageExists(run.workspaceId, task.pageKey)) ? "UPDATE_PAGE" : "CREATE_PAGE";
     const dedupeKey = `${writeType === "UPDATE_PAGE" ? "update" : "create"}-page:${task.pageKey}`;
-    await insertTask({
+    const queued: string[] = [];
+    if (await insertTask({
       generationRunId: run.id,
       workspaceId: run.workspaceId,
       repositoryRole: "FRONTEND",
@@ -310,12 +313,37 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       dedupeKey,
       reason: `${writeType === "UPDATE_PAGE" ? "update" : "create"} page from traced behavior`,
       payloadJson: { pageKey: task.pageKey, frontendAnchor: task.payloadJson }
-    });
+    })) {
+      queued.push(dedupeKey);
+    }
+
+    const relatedDedupeKey = `discover-related:${task.rootTaskId ?? task.id}:${task.pageKey}:depth-1`;
+    if (await insertTask({
+      generationRunId: run.id,
+      workspaceId: run.workspaceId,
+      repositoryRole: "FRONTEND",
+      repositoryId: run.frontendRepositoryId,
+      taskType: "DISCOVER_RELATED_CONCEPTS",
+      pageKey: task.pageKey,
+      parentTaskId: task.id,
+      rootTaskId: task.rootTaskId ?? task.id,
+      dedupeKey: relatedDedupeKey,
+      reason: "discover related product concepts",
+      payloadJson: { depth: 1, sourcePageKey: task.pageKey, frontendAnchor: task.payloadJson }
+    })) {
+      queued.push(relatedDedupeKey);
+    }
+
     await finishTask(task.id, {
       status: "SUCCEEDED",
       branchState: "WAITING_RELATED_BRANCH",
-      resultJson: { queued: [dedupeKey] }
+      resultJson: { queued }
     }, task);
+    return;
+  }
+
+  if (task.taskType === "DISCOVER_RELATED_CONCEPTS") {
+    await processRelatedConceptTask(run, task);
     return;
   }
 
@@ -401,7 +429,7 @@ async function insertTask(value: {
   workspaceId: string;
   repositoryRole?: "FRONTEND" | "BACKEND";
   repositoryId?: string | null;
-  taskType: "DISCOVER_SURFACE" | "TRACE_BEHAVIOR" | "CREATE_PAGE" | "UPDATE_PAGE" | "EVALUATE_COVERAGE";
+  taskType: "DISCOVER_SURFACE" | "TRACE_BEHAVIOR" | "DISCOVER_RELATED_CONCEPTS" | "CREATE_PAGE" | "UPDATE_PAGE" | "EVALUATE_COVERAGE";
   pageKey?: string | null;
   parentTaskId?: string | null;
   rootTaskId?: string | null;
@@ -444,6 +472,86 @@ async function insertTask(value: {
       }
     });
   }
+  return inserted.length > 0;
+}
+
+async function processRelatedConceptTask(run: GenerationRun, task: GenerationTask) {
+  const db = getDb();
+  const depth = taskDepth(task);
+  const sourcePageKey = taskSourcePageKey(task);
+
+  if (depth >= MAX_RELATED_DISCOVERY_DEPTH) {
+    await finishTask(task.id, {
+      status: "SUCCEEDED",
+      resultJson: { depth, sourcePageKey, stopped: "MAX_DEPTH" }
+    }, task);
+    return;
+  }
+
+  const [factRows, evidenceRows, codeMapRows, existingPages] = await Promise.all([
+    db.select().from(codeFacts).where(eq(codeFacts.generationRunId, run.id)),
+    db.select().from(evidenceTable).where(eq(evidenceTable.generationRunId, run.id)),
+    db.select().from(codeMaps).where(eq(codeMaps.generationRunId, run.id)).limit(1),
+    db.select().from(wikiPages).where(eq(wikiPages.workspaceId, run.workspaceId))
+  ]);
+  const codeMap = readCodeMap(codeMapRows[0]?.mapJson);
+  const concepts = deriveProductConcepts({ facts: factRows, evidence: evidenceRows, codeMap });
+  const decisions = matchConceptsToPages({
+    concepts,
+    existingPageKeys: existingPages.map((page) => page.pageKey).filter((pageKey): pageKey is string => typeof pageKey === "string"),
+    sourcePageKey
+  });
+
+  const queued: string[] = [];
+  const needsReview = decisions.filter((decision) => decision.disposition === "NEEDS_REVIEW");
+  const excluded = decisions.filter((decision) => decision.disposition === "EXCLUDED_NO_WIKI_VALUE");
+  for (const decision of decisions.filter(isWritableDecision)) {
+    const dedupeKey = `${decision.disposition === "UPDATE_PAGE" ? "update" : "create"}-page:${decision.pageKey}`;
+    if (await insertTask({
+      generationRunId: run.id,
+      workspaceId: run.workspaceId,
+      repositoryRole: "FRONTEND",
+      repositoryId: run.frontendRepositoryId,
+      taskType: decision.disposition,
+      pageKey: decision.pageKey,
+      parentTaskId: task.id,
+      rootTaskId: task.rootTaskId ?? task.id,
+      dedupeKey,
+      reason: decision.reason,
+      payloadJson: {
+        pageKey: decision.pageKey,
+        conceptKey: decision.conceptKey,
+        evidenceIds: decision.evidenceIds,
+        sourcePageKey,
+        depth,
+        relatedConcept: decision
+      }
+    })) {
+      queued.push(dedupeKey);
+    }
+  }
+
+  if (queued.length > 0) {
+    await finishTask(task.id, {
+      status: "SUCCEEDED",
+      branchState: "FOUND_CHILDREN",
+      resultJson: { depth, sourcePageKey, queued, needsReview, excluded }
+    }, task);
+    return;
+  }
+
+  if (needsReview.length > 0) {
+    await finishTask(task.id, {
+      status: "NEEDS_REVIEW",
+      resultJson: { depth, sourcePageKey, reason: "RELATED_CONCEPTS_NEED_REVIEW", needsReview, excluded }
+    }, task);
+    return;
+  }
+
+  await finishTask(task.id, {
+    status: "SUCCEEDED",
+    resultJson: { depth, sourcePageKey, queued, needsReview, excluded }
+  }, task);
 }
 
 async function finishTask(
@@ -596,6 +704,27 @@ function readCodeMapNodes(value: unknown) {
     throw new Error("INVALID_CODE_MAP");
   }
   return (value as { nodes: unknown[] }).nodes.filter(isCodeMapNode);
+}
+
+function readCodeMap(value: unknown): CodeMap {
+  if (!value || typeof value !== "object" || !Array.isArray((value as { nodes?: unknown }).nodes) || !Array.isArray((value as { edges?: unknown }).edges)) {
+    throw new Error("INVALID_CODE_MAP");
+  }
+  return value as CodeMap;
+}
+
+function taskDepth(task: GenerationTask) {
+  const depth = task.payloadJson && typeof task.payloadJson === "object" ? (task.payloadJson as { depth?: unknown }).depth : null;
+  return typeof depth === "number" && Number.isFinite(depth) ? depth : 1;
+}
+
+function taskSourcePageKey(task: GenerationTask) {
+  const sourcePageKey = task.payloadJson && typeof task.payloadJson === "object" ? (task.payloadJson as { sourcePageKey?: unknown }).sourcePageKey : null;
+  return typeof sourcePageKey === "string" && sourcePageKey ? sourcePageKey : task.pageKey ?? undefined;
+}
+
+function isWritableDecision(decision: ConceptPageDecision): decision is ConceptPageDecision & { disposition: "CREATE_PAGE" | "UPDATE_PAGE" } {
+  return decision.disposition === "CREATE_PAGE" || decision.disposition === "UPDATE_PAGE";
 }
 
 function isCodeMapNode(value: unknown): value is CodeMapNode {
