@@ -26,6 +26,7 @@ export type QualityEvidence = {
   id: string;
   generationRunId: string;
   repositoryRole: "FRONTEND" | "BACKEND";
+  userFacingText?: string | null;
 };
 
 export type ValidateQualityInput = {
@@ -70,6 +71,10 @@ export function validateQuality(input: ValidateQualityInput): QualityReport {
       if (block.type === "open_question") openQuestionCount += 1;
 
       for (const leak of leakIssues(blockText(block), page.pageKey, block.stableKey)) {
+        issues.push(leak);
+      }
+      const citedEvidenceText = "evidenceIds" in block ? (block.evidenceIds ?? []).map((id) => evidenceById.get(id)?.userFacingText ?? "").join(" ") : "";
+      for (const leak of technicalProseIssues(blockText(block), citedEvidenceText, page.pageKey, block.stableKey)) {
         issues.push(leak);
       }
 
@@ -154,6 +159,32 @@ function leakIssues(text: string, pageKey: string, blockStableKey: string): Qual
     ["PROVIDER_METADATA_LEAK", /\b(?:x-openrouter|x-ratelimit|cf-ray|set-cookie|raw provider metadata)\b/i, "Provider metadata or header-like leak."]
   ];
   return patterns.filter(([, pattern]) => pattern.test(text)).map(([code, , message]) => error(code, message, pageKey, blockStableKey));
+}
+
+function technicalProseIssues(text: string, citedEvidenceText: string, pageKey: string, blockStableKey: string): QualityIssue[] {
+  const terms = [
+    "api",
+    "endpoint",
+    "handler",
+    "sql",
+    "database",
+    "frontend",
+    "backend",
+    "component",
+    "route",
+    "function",
+    "schema"
+  ];
+  const pattern = new RegExp(`\\b(?:${terms.join("|")})\\b`, "i");
+  const leakedTerms = text.match(new RegExp(`\\b(?:${terms.join("|")})\\b`, "gi")) ?? [];
+  const disallowedTerms = leakedTerms.filter((term) => !new RegExp(`\\b${escapeRegExp(term)}\\b`, "i").test(citedEvidenceText));
+  return pattern.test(text) && disallowedTerms.length > 0
+    ? [error("TECHNICAL_PROSE_LEAK", "User-facing wiki text contains implementation terminology.", pageKey, blockStableKey)]
+    : [];
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function blockText(block: ProductWikiBlock) {

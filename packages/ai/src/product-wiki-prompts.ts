@@ -13,7 +13,8 @@ const systemPrompt = [
   "Never invent evidence IDs. Every CODE statement must use valid provided evidenceIds.",
   "Unsupported behavior must be omitted, treated as NEEDS_REVIEW, or represented as open_question; prefer omit/open_question because reviewState is normalized locally.",
   "Do not expose local paths, secrets, tokens, env values, Authorization headers, provider metadata, or raw hidden context.",
-  "Prefer product behavior over code trivia."
+  "Write user-facing product stories, not implementation explanations.",
+  "Do not use technical implementation terms such as API, endpoint, handler, SQL, database, frontend, backend, component, route, function, schema, or code identifiers unless that exact term is visibly user-facing in the product evidence."
 ].join("\n");
 
 const blockContract = {
@@ -40,11 +41,12 @@ const evidencePolicy = [
 
 const styleGuide = [
   "Write product knowledge, not implementation trivia.",
-  "Audience: PO, QA, and engineers.",
+  "Audience: product, operations, support, QA, and implementation readers who need product behavior without implementation prose.",
   "Be concise, factual, and non-marketing.",
-  "Explain user-visible flows, business rules, validations, API contracts, permissions, side effects, error states, and dependencies.",
+  "Explain user-visible flows, business rules, validations, permissions, side effects, error states, and dependencies.",
   "Avoid file names, route names, component names, function names, and code-map stable keys unless user-visible and evidence-backed.",
-  "Prefer what happens and under what condition over where code lives."
+  "Prefer what happens and under what condition over where code lives.",
+  "For updates, return the full updated page using existingPage as context; do not return a patch."
 ] as const;
 
 const stagedInstructions = [
@@ -58,8 +60,9 @@ const stagedInstructions = [
   {
     stage: "Product Page Writing",
     instructions: [
-      "Write concise ProductWikiBlock pages for PO, QA, and engineers.",
-      "Prefer flows, business rules, validations, API contracts, permissions, side effects, error states, and dependencies over code trivia."
+      "Write concise ProductWikiBlock pages in product-story language.",
+      "Prefer flows, business rules, validations, permissions, side effects, error states, and dependencies over code trivia.",
+      "Do not mention implementation mechanics or technical layers in user-facing text."
     ]
   },
   {

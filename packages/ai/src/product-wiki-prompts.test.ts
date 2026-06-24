@@ -40,12 +40,14 @@ describe("product wiki prompts", () => {
     expect(text).toContain("If support is weak, low-confidence, incomplete, or ambiguous");
   });
 
-  it("prefers product behavior over code trivia", () => {
+  it("enforces non-technical product story wording", () => {
     const text = messageText(buildProductWikiMessages(input()));
 
-    expect(text).toContain("Prefer product behavior over code trivia");
+    expect(text).toContain("Write user-facing product stories, not implementation explanations");
     expect(text).toContain("Write product knowledge, not implementation trivia");
-    expect(text).toContain("Prefer flows, business rules, validations, API contracts, permissions, side effects, error states, and dependencies over code trivia");
+    expect(text).toContain("Do not use technical implementation terms");
+    expect(text).toContain("Prefer flows, business rules, validations, permissions, side effects, error states, and dependencies over code trivia");
+    expect(text).not.toContain("API contracts");
   });
 
   it("repair prompt forbids new claims", () => {

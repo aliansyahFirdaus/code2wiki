@@ -26,6 +26,7 @@ describe("toGenerationRunResponse", () => {
         qualityReportJson: null,
         aiUsageJson: null,
         incrementalReportJson: null,
+        coverageReportJson: null,
         errorMessage: null,
         startedAt: null,
         finishedAt: null,
@@ -91,6 +92,7 @@ describe("toGenerationRunResponse", () => {
           aiRequestCountSavedEstimate: 0,
           pageInputHashVersion: "page-input-v1"
         },
+        coverageReportJson: null,
         errorMessage: null,
         startedAt: null,
         finishedAt: null,
@@ -122,5 +124,6 @@ describe("toGenerationRunResponse", () => {
     expect(response).not.toHaveProperty("qualityReportJson");
     expect(response).not.toHaveProperty("aiUsageJson");
     expect(response).not.toHaveProperty("incrementalReportJson");
+    expect(response).not.toHaveProperty("coverageReportJson");
   });
 });

@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 
-import { generationRuns, getDb, wikiPages } from "@code2wiki/db";
+import { generationRuns, getDb } from "@code2wiki/db";
 import { sanitizeErrorText } from "@code2wiki/shared";
 import { toGenerationRunResponse } from "../../../../lib/generation-run-response";
+import { pagesByGenerationRun } from "../../../../lib/run-pages";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,7 @@ export async function GET(_request: Request, context: Context) {
       return NextResponse.json({ error: { code: "GENERATION_RUN_NOT_FOUND", message: "Generation run not found." } }, { status: 404 });
     }
 
-    const pages = await db.select().from(wikiPages).where(eq(wikiPages.generationRunId, run.id));
+    const pages = (await pagesByGenerationRun([run.id])).get(run.id) ?? [];
     return NextResponse.json({ generationRun: toGenerationRunResponse(run, pages) });
   } catch (error) {
     return NextResponse.json(

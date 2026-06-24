@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
-import { generationRuns, getDb, wikiPages } from "@code2wiki/db";
+import { generationRuns, getDb } from "@code2wiki/db";
 import { sanitizeErrorText } from "@code2wiki/shared";
 import { toGenerationRunResponse } from "../../../lib/generation-run-response";
+import { pagesByGenerationRun } from "../../../lib/run-pages";
 
 export const dynamic = "force-dynamic";
 
@@ -20,14 +21,7 @@ export async function GET(request: Request) {
       .from(generationRuns)
       .where(eq(generationRuns.workspaceId, workspaceId))
       .orderBy(desc(generationRuns.createdAt));
-    const pages =
-      rows.length > 0
-        ? await db.select().from(wikiPages).where(inArray(wikiPages.generationRunId, rows.map((run) => run.id)))
-        : [];
-    const pagesByRun = new Map<string, Array<typeof wikiPages.$inferSelect>>();
-    for (const page of pages) {
-      pagesByRun.set(page.generationRunId, [...(pagesByRun.get(page.generationRunId) ?? []), page]);
-    }
+    const pagesByRun = await pagesByGenerationRun(rows.map((run) => run.id));
 
     return NextResponse.json({
       generationRuns: rows.map((run) => toGenerationRunResponse(run, pagesByRun.get(run.id) ?? []))

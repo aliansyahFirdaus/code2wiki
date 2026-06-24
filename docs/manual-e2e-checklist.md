@@ -14,7 +14,7 @@ Use a real explicit `workspaceId`; `demo` is only an example.
 - [ ] Duplicate delivery/tag webhook does not create another run.
 - [ ] `pnpm worker:run -- clone <generationRunId>` moves `QUEUED` to `CLONED` or a sanitized `FAILED`.
 - [ ] `pnpm worker:run -- analyze <generationRunId>` moves `CLONED` to `FACTS_EXTRACTED` or a sanitized `FAILED`.
-- [ ] `pnpm worker:run -- generate <generationRunId>` moves `FACTS_EXTRACTED` to `COMPLETED`, `AI_OUTPUT_INVALID`, or a sanitized `FAILED`.
+- [ ] `pnpm worker:run -- generate <generationRunId>` processes queue-backed generation tasks and moves `FACTS_EXTRACTED` to `COMPLETED`, `NEEDS_REVIEW`, `AI_OUTPUT_INVALID`, or a sanitized `FAILED`.
 - [ ] `pnpm worker:run` prints sanitized JSON only.
 - [ ] `/api/generation-runs?workspaceId=demo` returns read-only run metadata and no secrets/raw headers/tokens.
 - [ ] `/api/generation-runs/<id>` returns one run and generated wiki page links.

@@ -1,5 +1,8 @@
 import { codeMaps, generationRuns, generationTasks, getDb, wikiPages } from "@code2wiki/db";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, or, sql } from "drizzle-orm";
+import { currentCoverageFingerprint, evaluateCoverage } from "./coverage-evaluator";
+import { materializedPageCount, planIncrementalRun } from "./incremental-planner";
+import { writePageTask } from "./page-writer";
 
 const STALE_IN_PROGRESS_MS = 15 * 60 * 1000;
 const FRONTEND_SURFACE_KINDS = new Set(["UI_ROUTE", "REACT_COMPONENT", "NAVIGATION"]);
@@ -26,6 +29,7 @@ export type SelfExpandingGenerationResult =
       processed: number;
       queued: number;
       ready: number;
+      written: number;
       needsReview: number;
       failed: number;
     }
@@ -47,17 +51,25 @@ export async function runSelfExpandingGeneration(generationRunId?: string): Prom
       return { status: "skipped", reason: generationRunId ? "Generation run has no queue work." : "No generation queue work found." };
     }
 
-    const seeded = await seedDiscoverSurfaceTasks(run, requireSeedArtifact);
+    const incremental = requireSeedArtifact ? await planIncrementalRun(run) : { seeded: 0, mode: "FULL" as const };
+    const seeded = incremental.seeded + (incremental.mode === "FULL" ? await seedDiscoverSurfaceTasks(run, requireSeedArtifact) : 0);
     let processed = 0;
     for (;;) {
       const task = await claimNextTask(run.id);
       if (!task) {
-        break;
+        if (!(await ensureCoverageEvaluationTask(run))) {
+          break;
+        }
+        continue;
       }
       await processTask(run, task);
       processed += 1;
+      if (task.taskType === "EVALUATE_COVERAGE") {
+        break;
+      }
     }
 
+    await finalizeRunIfTerminal(run.id);
     const counts = await taskCounts(run.id);
     return { status: "tasks_processed", generationRunId: run.id, seeded, processed, ...counts };
   } catch (error) {
@@ -75,7 +87,17 @@ async function claimFactsExtractedRun(generationRunId?: string) {
   if (generationRunId) {
     const [claimed] = await db
       .update(generationRuns)
-      .set({ status: "AI_GENERATING", errorMessage: null, finishedAt: null })
+      .set({
+        status: "AI_GENERATING",
+        generatedStatementCount: 0,
+        generatedStatementWithEvidenceCount: 0,
+        qualityReportJson: null,
+        aiUsageJson: null,
+        incrementalReportJson: null,
+        coverageReportJson: null,
+        errorMessage: null,
+        finishedAt: null
+      })
       .where(and(eq(generationRuns.id, generationRunId), eq(generationRuns.status, "FACTS_EXTRACTED")))
       .returning();
     return claimed ?? null;
@@ -88,7 +110,17 @@ async function claimFactsExtractedRun(generationRunId?: string) {
     }
     const [claimed] = await tx
       .update(generationRuns)
-      .set({ status: "AI_GENERATING", errorMessage: null, finishedAt: null })
+      .set({
+        status: "AI_GENERATING",
+        generatedStatementCount: 0,
+        generatedStatementWithEvidenceCount: 0,
+        qualityReportJson: null,
+        aiUsageJson: null,
+        incrementalReportJson: null,
+        coverageReportJson: null,
+        errorMessage: null,
+        finishedAt: null
+      })
       .where(and(eq(generationRuns.id, nextRun.id), eq(generationRuns.status, "FACTS_EXTRACTED")))
       .returning();
     return claimed ?? null;
@@ -168,7 +200,7 @@ async function claimNextTask(generationRunId: string) {
   const [nextTask] = await db
     .select()
     .from(generationTasks)
-    .where(and(eq(generationTasks.generationRunId, generationRunId), eq(generationTasks.status, "QUEUED")))
+    .where(and(eq(generationTasks.generationRunId, generationRunId), or(eq(generationTasks.status, "QUEUED"), eq(generationTasks.status, "READY_TO_WRITE"))))
     .orderBy(asc(generationTasks.priority), asc(generationTasks.createdAt))
     .limit(1);
   if (!nextTask) {
@@ -187,7 +219,23 @@ async function claimNextTask(generationRunId: string) {
     })
     .where(and(eq(generationTasks.id, nextTask.id), eq(generationTasks.status, "QUEUED")))
     .returning();
-  return claimed ?? null;
+  if (claimed) {
+    return claimed;
+  }
+
+  const [claimedReady] = await db
+    .update(generationTasks)
+    .set({
+      status: "IN_PROGRESS",
+      attempts: sql`${generationTasks.attempts} + 1`,
+      claimedAt: new Date(),
+      startedAt: new Date(),
+      errorMessage: null,
+      updatedAt: new Date()
+    })
+    .where(and(eq(generationTasks.id, nextTask.id), eq(generationTasks.status, "READY_TO_WRITE")))
+    .returning();
+  return claimedReady ?? null;
 }
 
 async function processTask(run: GenerationRun, task: GenerationTask) {
@@ -247,14 +295,67 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
   }
 
   if (task.taskType === "CREATE_PAGE" || task.taskType === "UPDATE_PAGE") {
-    await finishTask(task.id, { status: "READY_TO_WRITE", resultJson: { phase: "phase_2_writes_this_task" } });
+    const result = await writePageTask(run, task);
+    if (result.ok) {
+      await finishTask(task.id, {
+        status: "WRITTEN",
+        resultJson: {
+          pageKey: result.pageKey,
+          generatedStatementCount: result.generatedStatementCount,
+          generatedStatementWithEvidenceCount: result.generatedStatementWithEvidenceCount,
+          qualityGateResult: result.qualityReport.gateResult,
+          aiCallCount: result.aiUsageReport.summary.callCount
+        }
+      });
+      return;
+    }
+
+    await finishTask(task.id, {
+      status: "FAILED",
+      errorMessage: result.errorMessage,
+      resultJson: { reason: result.status, qualityGateResult: result.qualityReport?.gateResult, aiCallCount: result.aiUsageReport?.summary.callCount ?? 0 }
+    });
+    await getDb()
+      .update(generationRuns)
+      .set({
+        status: result.status,
+        errorMessage: result.errorMessage,
+        qualityReportJson: result.qualityReport,
+        aiUsageJson: result.aiUsageReport,
+        finishedAt: new Date()
+      })
+      .where(eq(generationRuns.id, run.id));
     return;
   }
 
   if (task.taskType === "EVALUATE_COVERAGE") {
+    const result = await evaluateCoverage(run, task);
+    if (!result.ok) {
+      await finishTask(task.id, {
+        status: "FAILED",
+        errorMessage: result.errorMessage,
+        resultJson: { reason: "COVERAGE_EVALUATOR_FAILED" }
+      });
+      return;
+    }
+    if (result.queuedTaskDedupeKeys.length > 0) {
+      await finishTask(task.id, {
+        status: "SUCCEEDED",
+        branchState: "FOUND_CHILDREN",
+        resultJson: { fingerprint: result.report.fingerprint, queued: result.queuedTaskDedupeKeys }
+      });
+      return;
+    }
+    if (result.reviewGaps.length > 0) {
+      await finishTask(task.id, {
+        status: "NEEDS_REVIEW",
+        resultJson: { fingerprint: result.report.fingerprint, reason: "COVERAGE_REQUIRES_REVIEW", gaps: result.reviewGaps }
+      });
+      return;
+    }
     await finishTask(task.id, {
-      status: "NEEDS_REVIEW",
-      resultJson: { reason: "EVALUATE_COVERAGE_NOT_IMPLEMENTED_IN_PHASE_1" }
+      status: "SUCCEEDED",
+      resultJson: { fingerprint: result.report.fingerprint, acceptable: result.report.acceptable }
     });
     return;
   }
@@ -299,7 +400,7 @@ async function insertTask(value: {
 async function finishTask(
   taskId: string,
   value: {
-    status: "SUCCEEDED" | "READY_TO_WRITE" | "NO_WIKI_VALUE" | "NEEDS_REVIEW" | "FAILED";
+    status: "SUCCEEDED" | "READY_TO_WRITE" | "WRITTEN" | "NO_WIKI_VALUE" | "NEEDS_REVIEW" | "FAILED";
     branchState?: "FOUND_CHILDREN" | "WAITING_RELATED_BRANCH" | "NEEDS_FRONTEND_ANCHOR";
     resultJson?: Record<string, unknown>;
     errorMessage?: string | null;
@@ -333,9 +434,74 @@ async function taskCounts(generationRunId: string) {
   return {
     queued: rows.filter((task) => task.status === "QUEUED" || task.status === "IN_PROGRESS").length,
     ready: rows.filter((task) => task.status === "READY_TO_WRITE").length,
+    written: rows.filter((task) => task.status === "WRITTEN").length,
     needsReview: rows.filter((task) => task.status === "NEEDS_REVIEW").length,
     failed: rows.filter((task) => task.status === "FAILED").length
   };
+}
+
+async function ensureCoverageEvaluationTask(run: GenerationRun) {
+  const db = getDb();
+  const tasks = await db.select().from(generationTasks).where(eq(generationTasks.generationRunId, run.id));
+  if (tasks.some((task) => task.status === "QUEUED" || task.status === "IN_PROGRESS" || task.status === "READY_TO_WRITE")) {
+    return false;
+  }
+  const fingerprint = await currentCoverageFingerprint(run);
+  const dedupeKey = `evaluate-coverage:${fingerprint}`;
+  if (tasks.some((task) => task.taskType === "EVALUATE_COVERAGE" && task.dedupeKey === dedupeKey && (task.status === "SUCCEEDED" || task.status === "NEEDS_REVIEW"))) {
+    return false;
+  }
+  await insertTask({
+    generationRunId: run.id,
+    workspaceId: run.workspaceId,
+    taskType: "EVALUATE_COVERAGE",
+    dedupeKey,
+    reason: "evaluate deterministic coverage",
+    payloadJson: { fingerprint }
+  });
+  return true;
+}
+
+async function finalizeRunIfTerminal(generationRunId: string) {
+  const db = getDb();
+  const [run] = await db.select().from(generationRuns).where(eq(generationRuns.id, generationRunId)).limit(1);
+  if (!run || (run.status !== "AI_GENERATING" && run.status !== "VALIDATING")) {
+    return;
+  }
+
+  const tasks = await db.select().from(generationTasks).where(eq(generationTasks.generationRunId, generationRunId));
+  if (tasks.length === 0 || tasks.some((task) => task.status === "QUEUED" || task.status === "IN_PROGRESS" || task.status === "READY_TO_WRITE")) {
+    return;
+  }
+  if (tasks.some((task) => task.taskType === "EVALUATE_COVERAGE" && task.status === "SUCCEEDED" && task.branchState === "FOUND_CHILDREN")) {
+    return;
+  }
+  if (tasks.some((task) => task.status === "FAILED")) {
+    await db.update(generationRuns).set({ status: "FAILED", finishedAt: new Date(), errorMessage: "GENERATION_TASK_FAILED" }).where(eq(generationRuns.id, generationRunId));
+    return;
+  }
+
+  const fingerprint = await currentCoverageFingerprint(run);
+  const currentEvaluatorSucceeded = tasks.some(
+    (task) => task.taskType === "EVALUATE_COVERAGE" && task.dedupeKey === `evaluate-coverage:${fingerprint}` && task.status === "SUCCEEDED"
+  );
+  const coverageReport = readCoverageReport(run.coverageReportJson);
+  const materializedPages = await materializedPageCount(generationRunId);
+  const hasMaterializedPage = materializedPages > 0;
+  const status = currentEvaluatorSucceeded && coverageReport?.acceptable === true && hasMaterializedPage ? "COMPLETED" : "NEEDS_REVIEW";
+
+  await db
+    .update(generationRuns)
+    .set({
+      status,
+      finishedAt: new Date(),
+      errorMessage: status === "COMPLETED" ? null : hasMaterializedPage ? "COVERAGE_REQUIRES_REVIEW" : "NO_PAGE_MATERIALIZED"
+    })
+    .where(eq(generationRuns.id, generationRunId));
+}
+
+function readCoverageReport(value: unknown): { acceptable?: unknown } | null {
+  return value && typeof value === "object" ? (value as { acceptable?: unknown }) : null;
 }
 
 function readCodeMapNodes(value: unknown) {

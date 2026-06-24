@@ -31,6 +31,7 @@ export const generationRunStatusEnum = pgEnum("generation_run_status", [
   "AI_GENERATING",
   "VALIDATING",
   "COMPLETED",
+  "NEEDS_REVIEW",
   "FAILED",
   "AI_OUTPUT_INVALID"
 ]);
@@ -58,6 +59,12 @@ export const generationTaskBranchStateEnum = pgEnum("generation_task_branch_stat
   "FOUND_CHILDREN",
   "WAITING_RELATED_BRANCH",
   "NEEDS_FRONTEND_ANCHOR"
+]);
+export const wikiPageEvidenceCoverageRoleEnum = pgEnum("wiki_page_evidence_coverage_role", [
+  "PRIMARY",
+  "SUPPORTING",
+  "EXCLUDED_NO_WIKI_VALUE",
+  "NEEDS_REVIEW"
 ]);
 
 export const workspaces = pgTable("workspaces", {
@@ -156,6 +163,7 @@ export const generationRuns = pgTable(
     qualityReportJson: jsonb("quality_report_json").$type<Record<string, unknown> | null>(),
     aiUsageJson: jsonb("ai_usage_json").$type<Record<string, unknown> | null>(),
     incrementalReportJson: jsonb("incremental_report_json").$type<Record<string, unknown> | null>(),
+    coverageReportJson: jsonb("coverage_report_json").$type<Record<string, unknown> | null>(),
     errorMessage: text("error_message"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -295,6 +303,27 @@ export const wikiPages = pgTable(
   })
 );
 
+export const wikiRunPages = pgTable(
+  "wiki_run_pages",
+  {
+    id: text("id").primaryKey(),
+    generationRunId: text("generation_run_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    pageId: text("page_id").notNull(),
+    pageKey: text("page_key").notNull(),
+    materializationType: text("materialization_type").notNull(),
+    sourceGenerationRunId: text("source_generation_run_id"),
+    inputHash: text("input_hash"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    generationRunPageUnique: uniqueIndex("wiki_run_pages_run_page_unique").on(table.generationRunId, table.pageKey),
+    generationRunIdx: index("wiki_run_pages_run_idx").on(table.generationRunId),
+    pageIdx: index("wiki_run_pages_page_idx").on(table.pageId)
+  })
+);
+
 export const wikiBlocks = pgTable(
   "wiki_blocks",
   {
@@ -317,6 +346,24 @@ export const wikiBlocks = pgTable(
   },
   (table) => ({
     pageStableKeyUnique: uniqueIndex("wiki_blocks_page_stable_key_unique").on(table.pageId, table.stableKey)
+  })
+);
+
+export const wikiPageEvidence = pgTable(
+  "wiki_page_evidence",
+  {
+    id: text("id").primaryKey(),
+    generationRunId: text("generation_run_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    pageKey: text("page_key").notNull(),
+    evidenceId: text("evidence_id").notNull(),
+    factId: text("fact_id"),
+    sourceTaskId: text("source_task_id"),
+    coverageRole: wikiPageEvidenceCoverageRoleEnum("coverage_role").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    generationRunPageIdx: index("wiki_page_evidence_run_page_idx").on(table.generationRunId, table.pageKey)
   })
 );
 

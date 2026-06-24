@@ -1,3 +1,5 @@
+import type { ProductWikiBlock } from "@code2wiki/document";
+
 export type GenerateProductWikiFact = {
   id: string;
   repositoryRole: "FRONTEND" | "BACKEND";
@@ -29,6 +31,10 @@ export type ProductWikiPageGroup = {
   title: string;
   facts: GenerateProductWikiFact[];
   evidence: GenerateProductWikiEvidence[];
+  existingPage?: {
+    title: string;
+    blocks: ProductWikiBlock[];
+  };
 };
 
 export type GenerateProductWikiInput = {

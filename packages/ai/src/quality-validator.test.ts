@@ -10,7 +10,7 @@ describe("quality validator", () => {
     expect(report.gateResult).toBe("PASS");
   });
 
-  it("fails for missing evidence, wrong-generation evidence, invented page key, leaks, empty page, and unsupported related page", () => {
+  it("fails for missing evidence, wrong-generation evidence, invented page key, leaks, technical prose, empty page, and unsupported related page", () => {
     const report = validateQuality(
       input({
         allowedPageKeys: ["crew.add"],
@@ -27,6 +27,7 @@ describe("quality validator", () => {
                 block({ stableKey: "missing", evidenceIds: [] }),
                 block({ stableKey: "wrong-run", evidenceIds: ["ev-1"] }),
                 block({ stableKey: "leak", text: "Authorization: Bearer live-token sk-or-v1-secretsecret OPENROUTER_API_KEY=secret /Users/me/app x-openrouter" }),
+                block({ stableKey: "technical", text: "The API endpoint calls a backend handler.", evidenceIds: ["ev-2"] }),
                 relatedPage("unknown-page")
               ]
             },
@@ -46,6 +47,7 @@ describe("quality validator", () => {
       "RAW_ENV_ASSIGNMENT_LEAK",
       "LOCAL_PATH_LEAK",
       "PROVIDER_METADATA_LEAK",
+      "TECHNICAL_PROSE_LEAK",
       "EMPTY_PAGE",
       "UNSUPPORTED_RELATED_PAGE"
     ]));
@@ -83,6 +85,28 @@ describe("quality validator", () => {
     expect(report.gateResult).toBe("WARN");
     expect(report.issues.every((issue) => issue.severity === "WARN")).toBe(true);
   });
+
+  it("allows technical terms that are present in cited user-facing evidence", () => {
+    const report = validateQuality(
+      input({
+        evidence: [{ id: "ev-1", generationRunId: "run-1", repositoryRole: "FRONTEND", userFacingText: "API Key" }],
+        output: {
+          pages: [
+            {
+              pageKey: "crew.add",
+              title: "Add Crew",
+              blocks: [
+                block({ stableKey: "api-key", text: "API Key can be copied after creation.", evidenceIds: ["ev-1"] }),
+                block({ stableKey: "share", text: "The key can be shared with approved teammates.", evidenceIds: ["ev-1"] })
+              ]
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.gateResult).toBe("PASS");
+  });
 });
 
 function input(overrides: Partial<Parameters<typeof validateQuality>[0]> = {}): Parameters<typeof validateQuality>[0] {
@@ -100,7 +124,7 @@ function input(overrides: Partial<Parameters<typeof validateQuality>[0]> = {}): 
           title: "Add Crew",
           blocks: [
             block({ stableKey: "fe", text: "Crew can be added from the form.", evidenceIds: ["ev-1"] }),
-            block({ stableKey: "be", text: "Crew creation is saved by the API.", evidenceIds: ["ev-2"] })
+            block({ stableKey: "be", text: "Crew creation is saved after submission.", evidenceIds: ["ev-2"] })
           ]
         }
       ]

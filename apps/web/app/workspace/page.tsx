@@ -1,9 +1,10 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
 import { generationRuns, getDb, githubInstallations, repositories, wikiPages } from "@code2wiki/db";
 import { sanitizeErrorText } from "@code2wiki/shared";
+import { pagesByGenerationRun } from "../../lib/run-pages";
 import { formatCoverage } from "../../lib/wiki-blocks";
 
 export const dynamic = "force-dynamic";
@@ -101,14 +102,7 @@ async function loadWorkspaceData(workspaceId: string) {
       db.select().from(repositories).where(eq(repositories.workspaceId, workspaceId)),
       db.select().from(generationRuns).where(eq(generationRuns.workspaceId, workspaceId)).orderBy(desc(generationRuns.createdAt))
     ]);
-    const pages =
-      runs.length > 0
-        ? await db.select().from(wikiPages).where(inArray(wikiPages.generationRunId, runs.map((run) => run.id)))
-        : [];
-    const pagesByRun = new Map<string, Array<typeof wikiPages.$inferSelect>>();
-    for (const page of pages) {
-      pagesByRun.set(page.generationRunId, [...(pagesByRun.get(page.generationRunId) ?? []), page]);
-    }
+    const pagesByRun = await pagesByGenerationRun(runs.map((run) => run.id));
     return {
       ok: true as const,
       installations,

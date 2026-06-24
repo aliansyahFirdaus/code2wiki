@@ -4,9 +4,14 @@ import { runSelfExpandingGeneration } from "./task-queue";
 
 const mocks = vi.hoisted(() => ({
   getDb: vi.fn(),
+  codeFacts: { generationRunId: "code_facts.generation_run_id" },
   codeMaps: { generationRunId: "code_maps.generation_run_id" },
+  evidence: { generationRunId: "evidence.generation_run_id" },
   generationRuns: {
     id: "generation_runs.id",
+    workspaceId: "generation_runs.workspace_id",
+    frontendRepositoryId: "generation_runs.frontend_repository_id",
+    backendRepositoryId: "generation_runs.backend_repository_id",
     status: "generation_runs.status",
     createdAt: "generation_runs.created_at"
   },
@@ -21,27 +26,59 @@ const mocks = vi.hoisted(() => ({
   wikiPages: {
     workspaceId: "wiki_pages.workspace_id",
     pageKey: "wiki_pages.page_key"
-  }
+  },
+  wikiPageEvidence: {
+    id: "wiki_page_evidence.id",
+    generationRunId: "wiki_page_evidence.generation_run_id"
+  },
+  wikiRunPages: {
+    generationRunId: "wiki_run_pages.generation_run_id",
+    pageKey: "wiki_run_pages.page_key"
+  },
+  writePageTask: vi.fn()
 }));
 
 vi.mock("drizzle-orm", () => ({
   and: vi.fn((...conditions: unknown[]) => ({ type: "and", conditions })),
   asc: vi.fn((field: string) => field),
+  desc: vi.fn((field: string) => field),
   eq: vi.fn((field: string, value: unknown) => ({ type: "eq", field, value })),
+  ne: vi.fn((field: string, value: unknown) => ({ type: "ne", field, value })),
+  or: vi.fn((...conditions: unknown[]) => ({ type: "or", conditions })),
   sql: vi.fn(() => ({ type: "inc_attempts" }))
 }));
 
 vi.mock("@code2wiki/db", () => ({
+  codeFacts: mocks.codeFacts,
   codeMaps: mocks.codeMaps,
+  evidence: mocks.evidence,
   generationRuns: mocks.generationRuns,
   generationTasks: mocks.generationTasks,
   getDb: mocks.getDb,
-  wikiPages: mocks.wikiPages
+  wikiPageEvidence: mocks.wikiPageEvidence,
+  wikiPages: mocks.wikiPages,
+  wikiRunPages: mocks.wikiRunPages
+}));
+
+vi.mock("./page-writer", () => ({
+  writePageTask: mocks.writePageTask
 }));
 
 describe("self-expanding generation task queue", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.writePageTask.mockImplementation(async (run: any, task: any) => {
+      const db = mocks.getDb();
+      db.runPages.push({ generationRunId: run.id, workspaceId: run.workspaceId, pageId: `page-${task.pageKey}`, pageKey: task.pageKey, materializationType: "WRITTEN" });
+      return {
+      ok: true,
+      pageKey: task.pageKey ?? "users",
+      qualityReport: { gateResult: "PASS", issues: [], metrics: [] },
+      aiUsageReport: { calls: [], summary: { callCount: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCostUsdMicros: null, pricingSource: null } },
+      generatedStatementCount: 1,
+      generatedStatementWithEvidenceCount: 1
+      };
+    });
   });
 
   it("claims FACTS_EXTRACTED and seeds from frontend code-map surfaces", async () => {
@@ -53,9 +90,9 @@ describe("self-expanding generation task queue", () => {
 
     const result = await runSelfExpandingGeneration("run-1");
 
-    expect(result).toMatchObject({ status: "tasks_processed", generationRunId: "run-1", ready: 1, failed: 0 });
-    expect(db.runs[0].status).toBe("AI_GENERATING");
-    expect(db.tasks.map((task) => task.taskType)).toEqual(["DISCOVER_SURFACE", "TRACE_BEHAVIOR", "CREATE_PAGE"]);
+    expect(result).toMatchObject({ status: "tasks_processed", generationRunId: "run-1", written: 1, failed: 0 });
+    expect(db.runs[0].status).toBe("COMPLETED");
+    expect(db.tasks.map((task) => task.taskType)).toEqual(["DISCOVER_SURFACE", "TRACE_BEHAVIOR", "CREATE_PAGE", "EVALUATE_COVERAGE"]);
     expect(db.wikiPages).toHaveLength(0);
     expect(db.wikiBlocks).toHaveLength(0);
   });
@@ -89,8 +126,8 @@ describe("self-expanding generation task queue", () => {
 
     const result = await runSelfExpandingGeneration("run-1");
 
-    expect(result).toMatchObject({ status: "tasks_processed", ready: 1 });
-    expect(db.tasks.some((item) => item.taskType === "UPDATE_PAGE" && item.status === "READY_TO_WRITE")).toBe(true);
+    expect(result).toMatchObject({ status: "tasks_processed", written: 1 });
+    expect(db.tasks.some((item) => item.taskType === "UPDATE_PAGE" && item.status === "WRITTEN")).toBe(true);
   });
 
   it("marks stale IN_PROGRESS as FAILED when retry budget is exhausted", async () => {
@@ -151,9 +188,10 @@ describe("self-expanding generation task queue", () => {
     expect(db.runs[0]).toMatchObject({ status: "FAILED", errorMessage: "INVALID_CODE_MAP" });
   });
 
-  it("marks EVALUATE_COVERAGE as NEEDS_REVIEW instead of silent noop success", async () => {
+  it("marks EVALUATE_COVERAGE as NEEDS_REVIEW when coverage has review gaps", async () => {
     const db = new FakeDb({
       runs: [run("AI_GENERATING")],
+      evidence: [evidenceRow({ repositoryRole: "BACKEND", filePath: "app/api/users/route.ts" })],
       tasks: [task({ taskType: "EVALUATE_COVERAGE", dedupeKey: "evaluate-coverage:v1" })]
     });
     mocks.getDb.mockReturnValue(db);
@@ -163,8 +201,88 @@ describe("self-expanding generation task queue", () => {
     expect(result).toMatchObject({ status: "tasks_processed", needsReview: 1 });
     expect(db.tasks[0]).toMatchObject({
       status: "NEEDS_REVIEW",
-      resultJson: { reason: "EVALUATE_COVERAGE_NOT_IMPLEMENTED_IN_PHASE_1" }
+      resultJson: { reason: "COVERAGE_REQUIRES_REVIEW" }
     });
+  });
+
+  it("idle queue triggers evaluator", async () => {
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      tasks: [task({ status: "WRITTEN", taskType: "CREATE_PAGE", dedupeKey: "create-page:users" })],
+      runPages: [runPage()],
+      pageEvidence: [pageEvidence({ coverageRole: "PRIMARY" })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(db.tasks.some((item) => item.taskType === "EVALUATE_COVERAGE" && item.status === "SUCCEEDED")).toBe(true);
+  });
+
+  it("run cannot complete before evaluator success", async () => {
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      tasks: [task({ status: "WRITTEN", taskType: "CREATE_PAGE", dedupeKey: "create-page:users" })],
+      runPages: [runPage()]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(db.runs[0].status).toBe("COMPLETED");
+    expect(db.tasks.some((item) => item.taskType === "EVALUATE_COVERAGE")).toBe(true);
+  });
+
+  it("unresolved evaluator review gaps move run to NEEDS_REVIEW", async () => {
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      evidence: [evidenceRow({ repositoryRole: "BACKEND", filePath: "app/api/users/route.ts" })],
+      tasks: [task({ status: "WRITTEN", taskType: "CREATE_PAGE", dedupeKey: "create-page:users" })],
+      runPages: [runPage()]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(db.runs[0]).toMatchObject({ status: "NEEDS_REVIEW", errorMessage: "COVERAGE_REQUIRES_REVIEW" });
+  });
+
+  it("evaluator-created tasks keep run in AI_GENERATING", async () => {
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      facts: [fact()],
+      evidence: [evidenceRow()],
+      tasks: [task({ status: "WRITTEN", taskType: "CREATE_PAGE", dedupeKey: "create-page:seed" })],
+      runPages: [runPage({ pageKey: "seed" })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    expect(db.tasks.some((item) => item.dedupeKey === "create-page:users")).toBe(true);
+    expect(db.tasks.find((item) => item.taskType === "EVALUATE_COVERAGE")).toMatchObject({ status: "SUCCEEDED", branchState: "FOUND_CHILDREN", resultJson: { queued: ["create-page:users"] } });
+    expect(db.runs[0].status).toBe("AI_GENERATING");
+  });
+
+  it("dedupe-conflicted evaluator tasks do not report FOUND_CHILDREN or hang the run", async () => {
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      facts: [fact()],
+      evidence: [evidenceRow()],
+      codeMaps: [codeMap([uiRoute("/users", "app/users/page.tsx")])],
+      tasks: [
+        task({ id: "written-task", status: "WRITTEN", taskType: "CREATE_PAGE", dedupeKey: "create-page:seed" }),
+        task({ id: "existing-users-task", status: "NEEDS_REVIEW", taskType: "CREATE_PAGE", dedupeKey: "create-page:users" })
+      ],
+      runPages: [runPage({ pageKey: "seed" })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    const evaluator = db.tasks.find((item) => item.taskType === "EVALUATE_COVERAGE");
+    expect(evaluator).toMatchObject({ status: "SUCCEEDED", branchState: undefined, resultJson: { acceptable: false } });
+    expect(db.runs[0]).toMatchObject({ status: "NEEDS_REVIEW", errorMessage: "COVERAGE_REQUIRES_REVIEW" });
   });
 });
 
@@ -175,6 +293,7 @@ function run(status: string) {
     frontendRepositoryId: "repo-fe",
     backendRepositoryId: "repo-be",
     status,
+    coverageReportJson: null,
     createdAt: new Date("2026-01-01T00:00:00Z")
   };
 }
@@ -252,19 +371,91 @@ function task(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+function fact(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "fact-1",
+    generationRunId: "run-1",
+    repositoryRole: "FRONTEND",
+    repositoryFullName: "acme/web",
+    tag: "v1",
+    commitSha: "sha",
+    factKind: "FORM",
+    text: "Users can be created.",
+    evidenceIds: ["evidence-1"],
+    confidence: 0.9,
+    ...overrides
+  };
+}
+
+function evidenceRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "evidence-1",
+    generationRunId: "run-1",
+    repositoryRole: "FRONTEND",
+    repositoryFullName: "acme/web",
+    tag: "v1",
+    commitSha: "sha",
+    filePath: "app/users/page.tsx",
+    startLine: 1,
+    endLine: 3,
+    sourceKind: "FORM",
+    summary: "User form",
+    codeSnippet: "form",
+    githubUrl: "https://example.test",
+    ...overrides
+  };
+}
+
+function pageEvidence(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "wpe-1",
+    generationRunId: "run-1",
+    workspaceId: "workspace-1",
+    pageKey: "users",
+    evidenceId: "evidence-1",
+    factId: "fact-1",
+    sourceTaskId: "task-1",
+    coverageRole: "PRIMARY",
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides
+  };
+}
+
+function runPage(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "wrp-1",
+    generationRunId: "run-1",
+    workspaceId: "workspace-1",
+    pageId: "page-users",
+    pageKey: "users",
+    materializationType: "WRITTEN",
+    sourceGenerationRunId: null,
+    inputHash: null,
+    ...overrides
+  };
+}
+
 class FakeDb {
   runs: any[];
   codeMaps: any[];
   tasks: any[];
   wikiPages: any[];
   wikiBlocks: any[];
+  facts: any[];
+  evidence: any[];
+  pageEvidence: any[];
+  runPages: any[];
 
-  constructor(input: { runs?: any[]; codeMaps?: any[]; tasks?: any[]; wikiPages?: any[]; wikiBlocks?: any[] }) {
+  constructor(input: { runs?: any[]; codeMaps?: any[]; tasks?: any[]; wikiPages?: any[]; wikiBlocks?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; runPages?: any[] }) {
     this.runs = input.runs ?? [];
     this.codeMaps = input.codeMaps ?? [];
     this.tasks = input.tasks ?? [];
     this.wikiPages = input.wikiPages ?? [];
     this.wikiBlocks = input.wikiBlocks ?? [];
+    this.facts = input.facts ?? [];
+    this.evidence = input.evidence ?? [];
+    this.pageEvidence = input.pageEvidence ?? [];
+    this.runPages = input.runPages ?? [];
   }
 
   transaction(callback: (tx: FakeDb) => Promise<unknown>) {
@@ -285,9 +476,13 @@ class FakeDb {
 
   rows(table: unknown) {
     if (table === mocks.generationRuns) return this.runs;
+    if (table === mocks.codeFacts) return this.facts;
     if (table === mocks.codeMaps) return this.codeMaps;
+    if (table === mocks.evidence) return this.evidence;
     if (table === mocks.generationTasks) return this.tasks;
     if (table === mocks.wikiPages) return this.wikiPages;
+    if (table === mocks.wikiPageEvidence) return this.pageEvidence;
+    if (table === mocks.wikiRunPages) return this.runPages;
     return [];
   }
 }
@@ -358,22 +553,48 @@ class InsertBuilder {
   values(value: Record<string, unknown>) {
     const rows = Array.isArray(value) ? value : [value];
     const run = async () => {
+      const inserted: Record<string, unknown>[] = [];
       if (this.table === mocks.generationTasks) {
         for (const row of rows) {
           if (!this.db.tasks.some((task) => task.generationRunId === row.generationRunId && task.dedupeKey === row.dedupeKey)) {
-            this.db.tasks.push(task({ id: row.id, ...row }));
+            const insertedTask = task({ id: row.id, ...row });
+            this.db.tasks.push(insertedTask);
+            inserted.push(insertedTask);
           }
         }
       }
+      if (this.table === mocks.wikiPageEvidence) {
+        for (const row of rows) {
+          if (!this.db.pageEvidence.some((item) => item.id === row.id)) {
+            this.db.pageEvidence.push(row);
+            inserted.push(row);
+          }
+        }
+      }
+      if (this.table === mocks.wikiRunPages) {
+        for (const row of rows) {
+          if (!this.db.runPages.some((item) => item.generationRunId === row.generationRunId && item.pageKey === row.pageKey)) {
+            this.db.runPages.push(row);
+            inserted.push(row);
+          }
+        }
+      }
+      return inserted;
     };
-    return { onConflictDoNothing: run, then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => run().then(resolve, reject) };
+    return {
+      onConflictDoNothing: () => ({ returning: () => run(), then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => run().then(resolve, reject) }),
+      onConflictDoUpdate: () => run(),
+      then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => run().then(resolve, reject)
+    };
   }
 }
 
 function matches(row: Record<string, unknown>, condition: any): boolean {
   if (!condition) return true;
   if (condition.type === "and") return condition.conditions.every((item: unknown) => matches(row, item));
+  if (condition.type === "or") return condition.conditions.some((item: unknown) => matches(row, item));
   if (condition.type === "eq") return row[columnName(condition.field)] === condition.value;
+  if (condition.type === "ne") return row[columnName(condition.field)] !== condition.value;
   return true;
 }
 
