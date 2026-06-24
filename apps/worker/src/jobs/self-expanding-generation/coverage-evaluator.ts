@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { codeFacts, codeMaps, evidence, generationRuns, generationTasks, getDb, wikiPageEvidence, wikiPages } from "@code2wiki/db";
 import { eq } from "drizzle-orm";
+import { emitDebugEvent } from "./debug-events";
 
 type GenerationRun = typeof generationRuns.$inferSelect;
 type GenerationTask = typeof generationTasks.$inferSelect;
@@ -67,9 +68,33 @@ export async function currentCoverageFingerprint(run: GenerationRun) {
 
 export async function evaluateCoverage(run: GenerationRun, task: GenerationTask): Promise<CoverageEvaluationResult> {
   try {
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "coverage",
+      eventType: "COVERAGE_STARTED",
+      message: "Coverage evaluation started.",
+      payload: { taskId: task.id }
+    });
     const input = await loadCoverageInput(run);
     const evaluation = buildCoverageReport(input);
     const db = getDb();
+
+    for (const gap of evaluation.gaps) {
+      await emitDebugEvent({
+        generationRunId: run.id,
+        stage: "coverage",
+        eventType: "COVERAGE_GAP_FOUND",
+        severity: gap.disposition === "NEEDS_REVIEW" ? "WARN" : "INFO",
+        message: "Coverage gap classified.",
+        payload: {
+          disposition: gap.disposition,
+          pageKey: gap.pageKey,
+          evidenceId: gap.evidenceId,
+          factId: gap.factId,
+          reason: gap.reason
+        }
+      });
+    }
 
     for (const gap of evaluation.gaps.filter((item) => item.disposition === "EXCLUDED_NO_WIKI_VALUE" || item.disposition === "NEEDS_REVIEW")) {
       const coverageRole = gap.disposition as "EXCLUDED_NO_WIKI_VALUE" | "NEEDS_REVIEW";
@@ -97,11 +122,26 @@ export async function evaluateCoverage(run: GenerationRun, task: GenerationTask)
         .returning({ id: generationTasks.id });
       if (inserted.length > 0) {
         queuedTaskDedupeKeys.push(dedupeKey);
+        await emitDebugEvent({
+          generationRunId: run.id,
+          stage: "task_queue",
+          eventType: "TASK_QUEUED",
+          message: "Generation task queued.",
+          payload: { taskId: inserted[0].id, taskType: value.taskType, pageKey: value.pageKey, dedupeKey }
+        });
       }
     }
 
     const report = { ...evaluation.report, counts: { ...evaluation.report.counts, queuedTasks: queuedTaskDedupeKeys.length }, queuedTaskDedupeKeys };
     await db.update(generationRuns).set({ coverageReportJson: report, errorMessage: null }).where(eq(generationRuns.id, run.id));
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "coverage",
+      eventType: report.acceptable ? "COVERAGE_ACCEPTED" : "COVERAGE_NEEDS_REVIEW",
+      severity: report.acceptable ? "INFO" : "WARN",
+      message: report.acceptable ? "Coverage accepted." : "Coverage needs more generation or review.",
+      payload: { counts: report.counts, queuedTaskDedupeKeys }
+    });
     return { ok: true, report, queuedTaskDedupeKeys, reviewGaps: evaluation.gaps.filter((gap) => gap.disposition === "NEEDS_REVIEW") };
   } catch (error) {
     return { ok: false, errorMessage: error instanceof Error ? error.message.slice(0, 300) : "COVERAGE_EVALUATOR_FAILED" };

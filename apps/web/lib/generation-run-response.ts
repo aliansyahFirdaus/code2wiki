@@ -24,6 +24,7 @@ export function toGenerationRunResponse(run: typeof generationRuns.$inferSelect,
     qualityIssueCounts: qualityIssueCounts(run.qualityReportJson),
     aiUsageSummary: aiUsageSummary(run.aiUsageJson),
     incrementalSummary: incrementalSummary(run.incrementalReportJson),
+    coverageSummary: coverageSummary(run.coverageReportJson),
     errorMessage: run.errorMessage ? sanitizeErrorText(run.errorMessage) : null,
     startedAt: run.startedAt?.toISOString() ?? null,
     finishedAt: run.finishedAt?.toISOString() ?? null,
@@ -80,6 +81,31 @@ function incrementalSummary(value: unknown) {
     reusedPageKeys: stringArray(value.reusedPageKeys),
     aiRequestCountSavedEstimate: numberOrNull(value.aiRequestCountSavedEstimate),
     pageInputHashVersion: typeof value.pageInputHashVersion === "string" ? value.pageInputHashVersion : null
+  };
+}
+
+function coverageSummary(value: unknown) {
+  if (!isRecord(value)) return null;
+  return {
+    acceptable: typeof value.acceptable === "boolean" ? value.acceptable : null,
+    counts: isRecord(value.counts) ? {
+      facts: numberOrNull(value.counts.facts),
+      evidence: numberOrNull(value.counts.evidence),
+      positiveCoverage: numberOrNull(value.counts.positiveCoverage),
+      terminalNegativeCoverage: numberOrNull(value.counts.terminalNegativeCoverage),
+      uncovered: numberOrNull(value.counts.uncovered),
+      queuedTasks: numberOrNull(value.counts.queuedTasks),
+      reviewGaps: numberOrNull(value.counts.reviewGaps)
+    } : null,
+    gaps: Array.isArray(value.gaps)
+      ? value.gaps.map((gap) => isRecord(gap) ? {
+          disposition: typeof gap.disposition === "string" ? gap.disposition : null,
+          pageKey: typeof gap.pageKey === "string" ? gap.pageKey : null,
+          evidenceId: typeof gap.evidenceId === "string" ? gap.evidenceId : null,
+          factId: typeof gap.factId === "string" ? gap.factId : null,
+          reason: typeof gap.reason === "string" ? gap.reason : null
+        } : null).filter(Boolean)
+      : []
   };
 }
 

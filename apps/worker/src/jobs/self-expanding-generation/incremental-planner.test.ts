@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     status: "generation_runs.status",
     createdAt: "generation_runs.created_at"
   },
+  generationDebugEvents: { id: "generation_debug_events.id" },
   generationTasks: {
     generationRunId: "generation_tasks.generation_run_id",
     dedupeKey: "generation_tasks.dedupe_key"
@@ -44,6 +45,7 @@ vi.mock("@code2wiki/db", () => ({
   codeMaps: mocks.codeMaps,
   evidence: mocks.evidence,
   generationRuns: mocks.generationRuns,
+  generationDebugEvents: mocks.generationDebugEvents,
   generationTasks: mocks.generationTasks,
   getDb: mocks.getDb,
   wikiPageEvidence: mocks.wikiPageEvidence,
@@ -79,6 +81,7 @@ describe("incremental planner", () => {
 
     await expect(planIncrementalRun(run("run-new", "FACTS_EXTRACTED") as any)).resolves.toEqual({ seeded: 0, mode: "FULL" });
     expect(db.runs[0].incrementalReportJson).toMatchObject({ mode: "FULL", baselineGenerationRunId: null });
+    expect(db.debugEvents.map((event) => event.eventType)).toContain("BASELINE_MISSING");
   });
 
   it("reuses unchanged baseline page without rewriting blocks", async () => {
@@ -101,6 +104,7 @@ describe("incremental planner", () => {
     expect(db.runPages).toMatchObject([{ generationRunId: "run-new", pageKey: "users", materializationType: "REUSED", sourceGenerationRunId: "run-old" }]);
     expect(db.pageEvidence.some((row) => row.generationRunId === "run-new" && row.evidenceId === "ev-new")).toBe(true);
     expect(db.blocks).toEqual([{ id: "baseline-block" }]);
+    expect(db.debugEvents.map((event) => event.eventType)).toEqual(expect.arrayContaining(["BASELINE_FOUND", "PAGE_CANDIDATES_BUILT", "PAGE_REUSED"]));
   });
 
   it("uses baseline run-page ownership even when canonical page belongs to an older run", async () => {
@@ -167,6 +171,7 @@ describe("incremental planner", () => {
 
     expect(db.tasks).toMatchObject([{ generationRunId: "run-new", taskType: "UPDATE_PAGE", pageKey: "users", dedupeKey: "update-page:users" }]);
     expect(db.runs[0].incrementalReportJson).toMatchObject({ mode: "INCREMENTAL", affectedPageKeys: ["users"], reuseMissReasons: { users: "input_hash_mismatch" } });
+    expect(db.debugEvents.map((event) => event.eventType)).toEqual(expect.arrayContaining(["PAGE_AFFECTED", "TASK_QUEUED"]));
   });
 });
 
@@ -227,8 +232,9 @@ class FakeDb {
   tasks: any[] = [];
   runPages: any[] = [];
   codeMaps: any[] = [];
+  debugEvents: any[] = [];
 
-  constructor(input: { runs: any[]; facts?: any[]; evidence?: any[]; pages?: any[]; pageEvidence?: any[]; blocks?: any[]; runPages?: any[]; codeMaps?: any[] }) {
+  constructor(input: { runs: any[]; facts?: any[]; evidence?: any[]; pages?: any[]; pageEvidence?: any[]; blocks?: any[]; runPages?: any[]; codeMaps?: any[]; debugEvents?: any[] }) {
     this.runs = input.runs;
     this.facts = input.facts ?? [];
     this.evidence = input.evidence ?? [];
@@ -237,6 +243,7 @@ class FakeDb {
     this.blocks = input.blocks ?? [];
     this.runPages = input.runPages ?? [];
     this.codeMaps = input.codeMaps ?? [];
+    this.debugEvents = input.debugEvents ?? [];
   }
 
   transaction(callback: (tx: FakeDb) => Promise<unknown>) {
@@ -264,6 +271,7 @@ class FakeDb {
     if (table === mocks.wikiPageEvidence) return this.pageEvidence;
     if (table === mocks.generationTasks) return this.tasks;
     if (table === mocks.wikiRunPages) return this.runPages;
+    if (table === mocks.generationDebugEvents) return this.debugEvents;
     return [];
   }
 }
@@ -316,12 +324,26 @@ class InsertBuilder {
   values(value: Record<string, unknown> | Array<Record<string, unknown>>) {
     const rows = Array.isArray(value) ? value : [value];
     const run = async () => {
+      const inserted: Record<string, unknown>[] = [];
       const target = this.db.rows(this.table);
       for (const row of rows) {
-        if (!target.some((item) => item.id === row.id || (item.generationRunId === row.generationRunId && item.pageKey === row.pageKey))) target.push(row);
+        const duplicate =
+          this.table === mocks.generationTasks
+            ? target.some((item) => item.generationRunId === row.generationRunId && item.dedupeKey === row.dedupeKey)
+            : this.table === mocks.wikiRunPages
+              ? target.some((item) => item.generationRunId === row.generationRunId && item.pageKey === row.pageKey)
+              : target.some((item) => item.id === row.id);
+        if (!duplicate) {
+          target.push(row);
+          inserted.push(row);
+        }
       }
+      return inserted;
     };
-    return { onConflictDoNothing: () => run(), then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => run().then(resolve, reject) };
+    return {
+      onConflictDoNothing: () => ({ returning: () => run(), then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => run().then(resolve, reject) }),
+      then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => run().then(resolve, reject)
+    };
   }
 }
 

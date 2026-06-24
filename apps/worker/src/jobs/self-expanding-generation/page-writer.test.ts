@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   codeSummaries: { generationRunId: "code_summaries.generation_run_id" },
   evidence: { generationRunId: "evidence.generation_run_id" },
   generationRuns: { id: "generation_runs.id" },
+  generationDebugEvents: { id: "generation_debug_events.id" },
   generationTasks: {},
   wikiBlocks: { pageId: "wiki_blocks.page_id", generationRunId: "wiki_blocks.generation_run_id" },
   wikiPageEvidence: {
@@ -44,6 +45,7 @@ vi.mock("@code2wiki/db", () => ({
   codeSummaries: mocks.codeSummaries,
   evidence: mocks.evidence,
   generationRuns: mocks.generationRuns,
+  generationDebugEvents: mocks.generationDebugEvents,
   generationTasks: mocks.generationTasks,
   getDb: mocks.getDb,
   wikiBlocks: mocks.wikiBlocks,
@@ -124,6 +126,7 @@ describe("page writer", () => {
       qualityReportJson: expect.objectContaining({ gateResult: "PASS" }),
       aiUsageJson: expect.objectContaining({ summary: expect.objectContaining({ callCount: 1 }) })
     });
+    expect(db.debugEvents.map((event) => event.eventType)).toEqual(["AI_PAGE_WRITE_STARTED", "PAGE_WRITTEN"]);
   });
 
   it("updates existing pages using the stored page id", async () => {
@@ -288,8 +291,9 @@ class FakeDb {
   blocks: any[];
   pageEvidence: any[];
   runPages: any[];
+  debugEvents: any[];
 
-  constructor(input: { runs?: any[]; facts?: any[]; evidence?: any[]; codeMaps?: any[]; summaries?: any[]; pages?: any[]; blocks?: any[]; pageEvidence?: any[]; runPages?: any[] }) {
+  constructor(input: { runs?: any[]; facts?: any[]; evidence?: any[]; codeMaps?: any[]; summaries?: any[]; pages?: any[]; blocks?: any[]; pageEvidence?: any[]; runPages?: any[]; debugEvents?: any[] }) {
     this.runs = input.runs ?? [];
     this.facts = input.facts ?? [];
     this.evidence = input.evidence ?? [];
@@ -299,6 +303,7 @@ class FakeDb {
     this.blocks = input.blocks ?? [];
     this.pageEvidence = input.pageEvidence ?? [];
     this.runPages = input.runPages ?? [];
+    this.debugEvents = input.debugEvents ?? [];
   }
 
   transaction(callback: (tx: FakeDb) => Promise<unknown>) {
@@ -331,6 +336,7 @@ class FakeDb {
     if (table === mocks.wikiBlocks) return this.blocks;
     if (table === mocks.wikiPageEvidence) return this.pageEvidence;
     if (table === mocks.wikiRunPages) return this.runPages;
+    if (table === mocks.generationDebugEvents) return this.debugEvents;
     return [];
   }
 }

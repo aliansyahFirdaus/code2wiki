@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   codeMaps: { generationRunId: "code_maps.generation_run_id" },
   evidence: { generationRunId: "evidence.generation_run_id" },
   generationRuns: { id: "generation_runs.id" },
+  generationDebugEvents: { id: "generation_debug_events.id" },
   generationTasks: {
     id: "generation_tasks.id",
     generationRunId: "generation_tasks.generation_run_id",
@@ -32,6 +33,7 @@ vi.mock("@code2wiki/db", () => ({
   codeMaps: mocks.codeMaps,
   evidence: mocks.evidence,
   generationRuns: mocks.generationRuns,
+  generationDebugEvents: mocks.generationDebugEvents,
   generationTasks: mocks.generationTasks,
   getDb: mocks.getDb,
   wikiPageEvidence: mocks.wikiPageEvidence,
@@ -53,6 +55,7 @@ describe("coverage evaluator", () => {
 
     expect(result).toMatchObject({ ok: true, report: { acceptable: true, counts: { positiveCoverage: 1, uncovered: 0 } } });
     expect(db.tasks).toHaveLength(0);
+    expect(db.debugEvents.some((event) => event.eventType === "COVERAGE_ACCEPTED")).toBe(true);
   });
 
   it("enqueues deterministic CREATE_PAGE for uncovered frontend anchor", async () => {
@@ -127,6 +130,7 @@ describe("coverage evaluator", () => {
 
     expect(result).toMatchObject({ ok: true, report: { acceptable: false } });
     expect(db.pageEvidence).toMatchObject([{ coverageRole: "NEEDS_REVIEW" }]);
+    expect(db.debugEvents.some((event) => event.eventType === "COVERAGE_NEEDS_REVIEW")).toBe(true);
   });
 
   it("rerunning evaluator does not create new fingerprint churn from negative rows", async () => {
@@ -238,14 +242,16 @@ class FakeDb {
   pageEvidence: any[];
   pages: any[];
   tasks: any[] = [];
+  debugEvents: any[] = [];
 
-  constructor(input: { codeMaps?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; pages?: any[]; tasks?: any[] }) {
+  constructor(input: { codeMaps?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; pages?: any[]; tasks?: any[]; debugEvents?: any[] }) {
     this.codeMaps = input.codeMaps ?? [];
     this.facts = input.facts ?? [];
     this.evidence = input.evidence ?? [];
     this.pageEvidence = input.pageEvidence ?? [];
     this.pages = input.pages ?? [];
     this.tasks = input.tasks ?? [];
+    this.debugEvents = input.debugEvents ?? [];
   }
 
   select() {
@@ -268,6 +274,7 @@ class FakeDb {
     if (table === mocks.generationTasks) return this.tasks;
     if (table === mocks.wikiPageEvidence) return this.pageEvidence;
     if (table === mocks.wikiPages) return this.pages;
+    if (table === mocks.generationDebugEvents) return this.debugEvents;
     return [];
   }
 }
@@ -332,6 +339,10 @@ class InsertBuilder {
             inserted.push(row);
           }
         }
+      }
+      if (this.table === mocks.generationDebugEvents) {
+        this.db.debugEvents.push(...rows);
+        inserted.push(...rows);
       }
       return inserted;
     };

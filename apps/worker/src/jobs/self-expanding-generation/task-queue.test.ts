@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     status: "generation_runs.status",
     createdAt: "generation_runs.created_at"
   },
+  generationDebugEvents: { id: "generation_debug_events.id" },
   generationTasks: {
     id: "generation_tasks.id",
     generationRunId: "generation_tasks.generation_run_id",
@@ -53,6 +54,7 @@ vi.mock("@code2wiki/db", () => ({
   codeMaps: mocks.codeMaps,
   evidence: mocks.evidence,
   generationRuns: mocks.generationRuns,
+  generationDebugEvents: mocks.generationDebugEvents,
   generationTasks: mocks.generationTasks,
   getDb: mocks.getDb,
   wikiPageEvidence: mocks.wikiPageEvidence,
@@ -154,6 +156,7 @@ describe("self-expanding generation task queue", () => {
     expect(db.tasks.filter((task) => task.dedupeKey === "discover-surface:users")).toHaveLength(1);
     expect(db.tasks.filter((task) => task.dedupeKey === "trace-behavior:users")).toHaveLength(1);
     expect(db.tasks.filter((task) => task.dedupeKey === "create-page:users")).toHaveLength(1);
+    expect(db.debugEvents.filter((event) => event.eventType === "TASK_QUEUED" && event.payloadJson.dedupeKey === "discover-surface:users")).toHaveLength(1);
   });
 
   it("keeps FOUND_CHILDREN and WAITING_RELATED_BRANCH as branch state, not completion status", async () => {
@@ -445,8 +448,9 @@ class FakeDb {
   evidence: any[];
   pageEvidence: any[];
   runPages: any[];
+  debugEvents: any[];
 
-  constructor(input: { runs?: any[]; codeMaps?: any[]; tasks?: any[]; wikiPages?: any[]; wikiBlocks?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; runPages?: any[] }) {
+  constructor(input: { runs?: any[]; codeMaps?: any[]; tasks?: any[]; wikiPages?: any[]; wikiBlocks?: any[]; facts?: any[]; evidence?: any[]; pageEvidence?: any[]; runPages?: any[]; debugEvents?: any[] }) {
     this.runs = input.runs ?? [];
     this.codeMaps = input.codeMaps ?? [];
     this.tasks = input.tasks ?? [];
@@ -456,6 +460,7 @@ class FakeDb {
     this.evidence = input.evidence ?? [];
     this.pageEvidence = input.pageEvidence ?? [];
     this.runPages = input.runPages ?? [];
+    this.debugEvents = input.debugEvents ?? [];
   }
 
   transaction(callback: (tx: FakeDb) => Promise<unknown>) {
@@ -483,6 +488,7 @@ class FakeDb {
     if (table === mocks.wikiPages) return this.wikiPages;
     if (table === mocks.wikiPageEvidence) return this.pageEvidence;
     if (table === mocks.wikiRunPages) return this.runPages;
+    if (table === mocks.generationDebugEvents) return this.debugEvents;
     return [];
   }
 }
@@ -578,6 +584,10 @@ class InsertBuilder {
             inserted.push(row);
           }
         }
+      }
+      if (this.table === mocks.generationDebugEvents) {
+        this.db.debugEvents.push(...rows);
+        inserted.push(...rows);
       }
       return inserted;
     };

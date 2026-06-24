@@ -1,6 +1,7 @@
 import { codeMaps, generationRuns, generationTasks, getDb, wikiPages } from "@code2wiki/db";
 import { and, asc, eq, or, sql } from "drizzle-orm";
 import { currentCoverageFingerprint, evaluateCoverage } from "./coverage-evaluator";
+import { emitDebugEvent } from "./debug-events";
 import { materializedPageCount, planIncrementalRun } from "./incremental-planner";
 import { writePageTask } from "./page-writer";
 
@@ -76,6 +77,14 @@ export async function runSelfExpandingGeneration(generationRunId?: string): Prom
     const errorMessage = sanitizeErrorMessage(error);
     if (run) {
       await db.update(generationRuns).set({ status: "FAILED", errorMessage, finishedAt: new Date() }).where(eq(generationRuns.id, run.id));
+      await emitDebugEvent({
+        generationRunId: run.id,
+        stage: "completion",
+        eventType: "RUN_FAILED",
+        severity: "ERROR",
+        message: "Generation run failed.",
+        payload: { errorMessage }
+      });
     }
     return { status: "failed", generationRunId: run?.id, errorMessage };
   }
@@ -152,7 +161,7 @@ async function resumableAiGeneratingRun(generationRunId?: string) {
         status: "FAILED",
         errorMessage: "STALE_TASK_RETRY_EXHAUSTED",
         resultJson: { reason: "stale in-progress task exceeded retry budget" }
-      });
+      }, task);
       continue;
     }
     await db
@@ -220,6 +229,13 @@ async function claimNextTask(generationRunId: string) {
     .where(and(eq(generationTasks.id, nextTask.id), eq(generationTasks.status, "QUEUED")))
     .returning();
   if (claimed) {
+    await emitDebugEvent({
+      generationRunId,
+      stage: "task_queue",
+      eventType: "TASK_STARTED",
+      message: "Generation task started.",
+      payload: taskPayload(claimed)
+    });
     return claimed;
   }
 
@@ -235,6 +251,15 @@ async function claimNextTask(generationRunId: string) {
     })
     .where(and(eq(generationTasks.id, nextTask.id), eq(generationTasks.status, "READY_TO_WRITE")))
     .returning();
+  if (claimedReady) {
+    await emitDebugEvent({
+      generationRunId,
+      stage: "task_queue",
+      eventType: "TASK_STARTED",
+      message: "Generation task started.",
+      payload: taskPayload(claimedReady)
+    });
+  }
   return claimedReady ?? null;
 }
 
@@ -244,7 +269,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       status: "NEEDS_REVIEW",
       branchState: "NEEDS_FRONTEND_ANCHOR",
       resultJson: { reason: "backend task has no frontend anchor" }
-    });
+    }, task);
     return;
   }
 
@@ -266,7 +291,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       status: "SUCCEEDED",
       branchState: "FOUND_CHILDREN",
       resultJson: { queued: [`trace-behavior:${task.pageKey}`] }
-    });
+    }, task);
     return;
   }
 
@@ -290,7 +315,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       status: "SUCCEEDED",
       branchState: "WAITING_RELATED_BRANCH",
       resultJson: { queued: [dedupeKey] }
-    });
+    }, task);
     return;
   }
 
@@ -306,7 +331,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
           qualityGateResult: result.qualityReport.gateResult,
           aiCallCount: result.aiUsageReport.summary.callCount
         }
-      });
+      }, task);
       return;
     }
 
@@ -314,7 +339,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       status: "FAILED",
       errorMessage: result.errorMessage,
       resultJson: { reason: result.status, qualityGateResult: result.qualityReport?.gateResult, aiCallCount: result.aiUsageReport?.summary.callCount ?? 0 }
-    });
+    }, task);
     await getDb()
       .update(generationRuns)
       .set({
@@ -325,6 +350,14 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
         finishedAt: new Date()
       })
       .where(eq(generationRuns.id, run.id));
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "completion",
+      eventType: "RUN_FAILED",
+      severity: "ERROR",
+      message: "Generation run failed during page writing.",
+      payload: { status: result.status, errorMessage: result.errorMessage }
+    });
     return;
   }
 
@@ -335,7 +368,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
         status: "FAILED",
         errorMessage: result.errorMessage,
         resultJson: { reason: "COVERAGE_EVALUATOR_FAILED" }
-      });
+      }, task);
       return;
     }
     if (result.queuedTaskDedupeKeys.length > 0) {
@@ -343,24 +376,24 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
         status: "SUCCEEDED",
         branchState: "FOUND_CHILDREN",
         resultJson: { fingerprint: result.report.fingerprint, queued: result.queuedTaskDedupeKeys }
-      });
+      }, task);
       return;
     }
     if (result.reviewGaps.length > 0) {
       await finishTask(task.id, {
         status: "NEEDS_REVIEW",
         resultJson: { fingerprint: result.report.fingerprint, reason: "COVERAGE_REQUIRES_REVIEW", gaps: result.reviewGaps }
-      });
+      }, task);
       return;
     }
     await finishTask(task.id, {
       status: "SUCCEEDED",
       resultJson: { fingerprint: result.report.fingerprint, acceptable: result.report.acceptable }
-    });
+    }, task);
     return;
   }
 
-  await finishTask(task.id, { status: "FAILED", errorMessage: "UNKNOWN_TASK_TYPE", resultJson: { reason: "unknown task type" } });
+  await finishTask(task.id, { status: "FAILED", errorMessage: "UNKNOWN_TASK_TYPE", resultJson: { reason: "unknown task type" } }, task);
 }
 
 async function insertTask(value: {
@@ -377,7 +410,7 @@ async function insertTask(value: {
   payloadJson: Record<string, unknown>;
 }) {
   const db = getDb();
-  await db
+  const inserted = await db
     .insert(generationTasks)
     .values({
       id: crypto.randomUUID(),
@@ -394,7 +427,23 @@ async function insertTask(value: {
       payloadJson: value.payloadJson,
       updatedAt: new Date()
     })
-    .onConflictDoNothing({ target: [generationTasks.generationRunId, generationTasks.dedupeKey] });
+    .onConflictDoNothing({ target: [generationTasks.generationRunId, generationTasks.dedupeKey] })
+    .returning({ id: generationTasks.id });
+  if (inserted.length > 0) {
+    await emitDebugEvent({
+      generationRunId: value.generationRunId,
+      stage: "task_queue",
+      eventType: "TASK_QUEUED",
+      message: "Generation task queued.",
+      payload: {
+        taskId: inserted[0].id,
+        taskType: value.taskType,
+        pageKey: value.pageKey ?? null,
+        dedupeKey: value.dedupeKey,
+        repositoryRole: value.repositoryRole ?? null
+      }
+    });
+  }
 }
 
 async function finishTask(
@@ -404,7 +453,8 @@ async function finishTask(
     branchState?: "FOUND_CHILDREN" | "WAITING_RELATED_BRANCH" | "NEEDS_FRONTEND_ANCHOR";
     resultJson?: Record<string, unknown>;
     errorMessage?: string | null;
-  }
+  },
+  task?: GenerationTask
 ) {
   const db = getDb();
   await db
@@ -418,6 +468,16 @@ async function finishTask(
       updatedAt: new Date()
     })
     .where(eq(generationTasks.id, taskId));
+  if (task) {
+    await emitDebugEvent({
+      generationRunId: task.generationRunId,
+      stage: "task_queue",
+      eventType: value.status === "FAILED" ? "TASK_FAILED" : "TASK_FINISHED",
+      severity: value.status === "FAILED" ? "ERROR" : value.status === "NEEDS_REVIEW" ? "WARN" : "INFO",
+      message: value.status === "FAILED" ? "Generation task failed." : "Generation task finished.",
+      payload: { ...taskPayload(task), status: value.status, errorMessage: value.errorMessage ?? null }
+    });
+  }
 }
 
 async function pageExists(workspaceId: string, pageKey: string | null) {
@@ -478,6 +538,14 @@ async function finalizeRunIfTerminal(generationRunId: string) {
   }
   if (tasks.some((task) => task.status === "FAILED")) {
     await db.update(generationRuns).set({ status: "FAILED", finishedAt: new Date(), errorMessage: "GENERATION_TASK_FAILED" }).where(eq(generationRuns.id, generationRunId));
+    await emitDebugEvent({
+      generationRunId,
+      stage: "completion",
+      eventType: "RUN_FAILED",
+      severity: "ERROR",
+      message: "Generation run failed.",
+      payload: { errorMessage: "GENERATION_TASK_FAILED" }
+    });
     return;
   }
 
@@ -498,6 +566,25 @@ async function finalizeRunIfTerminal(generationRunId: string) {
       errorMessage: status === "COMPLETED" ? null : hasMaterializedPage ? "COVERAGE_REQUIRES_REVIEW" : "NO_PAGE_MATERIALIZED"
     })
     .where(eq(generationRuns.id, generationRunId));
+  await emitDebugEvent({
+    generationRunId,
+    stage: "completion",
+    eventType: status === "COMPLETED" ? "RUN_COMPLETED" : "RUN_NEEDS_REVIEW",
+    severity: status === "COMPLETED" ? "INFO" : "WARN",
+    message: status === "COMPLETED" ? "Generation run completed." : "Generation run needs review.",
+    payload: { status, materializedPages, coverageAcceptable: coverageReport?.acceptable === true }
+  });
+}
+
+function taskPayload(task: GenerationTask) {
+  return {
+    taskId: task.id,
+    taskType: task.taskType,
+    pageKey: task.pageKey,
+    repositoryRole: task.repositoryRole,
+    dedupeKey: task.dedupeKey,
+    attempts: task.attempts
+  };
 }
 
 function readCoverageReport(value: unknown): { acceptable?: unknown } | null {

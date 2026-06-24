@@ -92,7 +92,11 @@ describe("toGenerationRunResponse", () => {
           aiRequestCountSavedEstimate: 0,
           pageInputHashVersion: "page-input-v1"
         },
-        coverageReportJson: null,
+        coverageReportJson: {
+          acceptable: false,
+          counts: { facts: 1, evidence: 2, positiveCoverage: 1, terminalNegativeCoverage: 0, uncovered: 1, queuedTasks: 0, reviewGaps: 1 },
+          gaps: [{ disposition: "NEEDS_REVIEW", pageKey: "users", evidenceId: "ev-1", factId: "fact-1", reason: "NO_FRONTEND_ANCHOR", summary: "hidden", codeSnippet: "hidden" }]
+        },
         errorMessage: null,
         startedAt: null,
         finishedAt: null,
@@ -120,6 +124,11 @@ describe("toGenerationRunResponse", () => {
       reusedPageKeys: ["crew.list", "crew.detail"],
       aiRequestCountSavedEstimate: 0,
       pageInputHashVersion: "page-input-v1"
+    });
+    expect(response.coverageSummary).toEqual({
+      acceptable: false,
+      counts: { facts: 1, evidence: 2, positiveCoverage: 1, terminalNegativeCoverage: 0, uncovered: 1, queuedTasks: 0, reviewGaps: 1 },
+      gaps: [{ disposition: "NEEDS_REVIEW", pageKey: "users", evidenceId: "ev-1", factId: "fact-1", reason: "NO_FRONTEND_ANCHOR" }]
     });
     expect(response).not.toHaveProperty("qualityReportJson");
     expect(response).not.toHaveProperty("aiUsageJson");

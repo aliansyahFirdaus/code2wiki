@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { codeFacts, codeMaps, evidence, generationRuns, generationTasks, getDb, wikiPageEvidence, wikiPages, wikiRunPages } from "@code2wiki/db";
 import { and, desc, eq, ne } from "drizzle-orm";
 import { evidenceFingerprint, factFingerprint, PAGE_INPUT_HASH_VERSION, pageInputHash, pageKeyFromPath } from "./page-input";
+import { emitDebugEvent } from "./debug-events";
 
 type GenerationRun = typeof generationRuns.$inferSelect;
 type CodeFact = typeof codeFacts.$inferSelect;
@@ -27,8 +28,22 @@ export async function planIncrementalRun(run: GenerationRun): Promise<{ seeded: 
   const baseline = await latestBaselineRun(run);
   if (!baseline) {
     await db.update(generationRuns).set({ incrementalReportJson: report(null, "FULL", [], [], {}) }).where(eq(generationRuns.id, run.id));
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "incremental_planner",
+      eventType: "BASELINE_MISSING",
+      message: "No completed baseline run found.",
+      payload: { mode: "FULL" }
+    });
     return { seeded: 0, mode: "FULL" };
   }
+  await emitDebugEvent({
+    generationRunId: run.id,
+    stage: "incremental_planner",
+    eventType: "BASELINE_FOUND",
+    message: "Completed baseline run found.",
+    payload: { baselineGenerationRunId: baseline.id }
+  });
 
   const [currentFacts, currentEvidence, currentCodeMapRows, baselineFacts, baselineEvidence, workspacePages, baselineRunPages, baselinePageEvidence] = await Promise.all([
     db.select().from(codeFacts).where(eq(codeFacts.generationRunId, run.id)),
@@ -60,6 +75,14 @@ export async function planIncrementalRun(run: GenerationRun): Promise<{ seeded: 
   const affected: string[] = [];
   const miss: Record<string, string> = {};
 
+  await emitDebugEvent({
+    generationRunId: run.id,
+    stage: "incremental_planner",
+    eventType: "PAGE_CANDIDATES_BUILT",
+    message: "Page candidates built from current code map and baseline pages.",
+    payload: { pageCount: pageKeys.length, pageKeys }
+  });
+
   await db.transaction(async (tx) => {
     for (const pageKey of pageKeys) {
       const baselinePage = pagesByKey.get(pageKey);
@@ -67,12 +90,26 @@ export async function planIncrementalRun(run: GenerationRun): Promise<{ seeded: 
       if (!baselinePage) {
         affected.push(pageKey);
         miss[pageKey] = "missing_baseline_page";
+        await emitDebugEvent({
+          generationRunId: run.id,
+          stage: "incremental_planner",
+          eventType: "PAGE_AFFECTED",
+          message: "Page needs generation.",
+          payload: { pageKey, reason: miss[pageKey] }
+        });
         await enqueuePageTask(tx, run, pageKey, workspacePages.some((item) => item.pageKey === pageKey) ? "UPDATE_PAGE" : "CREATE_PAGE", inputHash);
         continue;
       }
       if (!baselinePage.inputHash || baselinePage.inputHash !== inputHash) {
         affected.push(pageKey);
         miss[pageKey] = baselinePage.inputHash ? "input_hash_mismatch" : "missing_baseline_input_hash";
+        await emitDebugEvent({
+          generationRunId: run.id,
+          stage: "incremental_planner",
+          eventType: "PAGE_AFFECTED",
+          message: "Page input changed.",
+          payload: { pageKey, reason: miss[pageKey] }
+        });
         await enqueuePageTask(tx, run, pageKey, "UPDATE_PAGE", inputHash);
         continue;
       }
@@ -89,6 +126,21 @@ export async function planIncrementalRun(run: GenerationRun): Promise<{ seeded: 
       if (!mappedRows) {
         affected.push(pageKey);
         miss[pageKey] = "evidence_remap_failed";
+        await emitDebugEvent({
+          generationRunId: run.id,
+          stage: "incremental_planner",
+          eventType: "EVIDENCE_REMAP_FAILED",
+          severity: "WARN",
+          message: "Baseline page evidence could not be remapped.",
+          payload: { pageKey }
+        });
+        await emitDebugEvent({
+          generationRunId: run.id,
+          stage: "incremental_planner",
+          eventType: "PAGE_AFFECTED",
+          message: "Page needs generation.",
+          payload: { pageKey, reason: miss[pageKey] }
+        });
         await enqueuePageTask(tx, run, pageKey, "UPDATE_PAGE", inputHash);
         continue;
       }
@@ -97,6 +149,13 @@ export async function planIncrementalRun(run: GenerationRun): Promise<{ seeded: 
         await tx.insert(wikiPageEvidence).values(mappedRows).onConflictDoNothing({ target: wikiPageEvidence.id });
       }
       reused.push(pageKey);
+      await emitDebugEvent({
+        generationRunId: run.id,
+        stage: "incremental_planner",
+        eventType: "PAGE_REUSED",
+        message: "Baseline page reused.",
+        payload: { pageKey, sourceGenerationRunId: baseline.id, remappedEvidenceCount: mappedRows.length }
+      });
     }
 
     await tx
@@ -183,7 +242,7 @@ function baselinePageKeys(workspacePages: WikiPage[], baselineRunPages: Array<ty
 
 async function enqueuePageTask(tx: { insert: ReturnType<typeof getDb>["insert"] }, run: GenerationRun, pageKey: string, taskType: "CREATE_PAGE" | "UPDATE_PAGE", inputHash: string | null) {
   const verb = taskType === "UPDATE_PAGE" ? "update" : "create";
-  await tx
+  const inserted = await tx
     .insert(generationTasks)
     .values({
       id: crypto.randomUUID(),
@@ -198,7 +257,17 @@ async function enqueuePageTask(tx: { insert: ReturnType<typeof getDb>["insert"] 
       payloadJson: { pageKey, inputHash },
       updatedAt: new Date()
     })
-    .onConflictDoNothing({ target: [generationTasks.generationRunId, generationTasks.dedupeKey] });
+    .onConflictDoNothing({ target: [generationTasks.generationRunId, generationTasks.dedupeKey] })
+    .returning({ id: generationTasks.id });
+  if (inserted.length > 0) {
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "task_queue",
+      eventType: "TASK_QUEUED",
+      message: "Generation task queued.",
+      payload: { taskId: inserted[0].id, taskType, pageKey, dedupeKey: `${verb}-page:${pageKey}` }
+    });
+  }
 }
 
 function groupEvidenceByPage(rows: Evidence[]) {

@@ -21,6 +21,7 @@ import { codeFacts, codeMaps, codeSummaries, evidence, generationRuns, generatio
 import type { ProductWikiBlock, ProductWikiOutput } from "@code2wiki/document";
 import { and, eq, sql } from "drizzle-orm";
 import { runPageValue } from "./incremental-planner";
+import { emitDebugEvent } from "./debug-events";
 import { pageInputHash } from "./page-input";
 
 type GenerationRun = typeof generationRuns.$inferSelect;
@@ -47,6 +48,13 @@ export async function writePageTask(run: GenerationRun, task: GenerationTask): P
   const validEvidenceIds = pageGroup.evidence.map((item) => item.id);
 
   try {
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "page_writer",
+      eventType: "AI_PAGE_WRITE_STARTED",
+      message: "AI page write started.",
+      payload: { taskId: task.id, taskType: task.taskType, pageKey, factCount: pageGroup.facts.length, evidenceCount: pageGroup.evidence.length }
+    });
     let generationResult = await provider.generateProductWiki({ generationRunId: run.id, pageGroups: [pageGroup] });
     usageCalls.push(buildAiUsageCall("generation", generationResult.usage));
     let checked = checkOutput({
@@ -58,6 +66,14 @@ export async function writePageTask(run: GenerationRun, task: GenerationTask): P
     });
 
     if (!checked.ok || checked.qualityReport.gateResult === "FAIL") {
+      await emitDebugEvent({
+        generationRunId: run.id,
+        stage: "page_writer",
+        eventType: "AI_PAGE_WRITE_REPAIR_STARTED",
+        severity: "WARN",
+        message: "AI page write repair started.",
+        payload: { taskId: task.id, taskType: task.taskType, pageKey, qualityGateResult: checked.ok ? checked.qualityReport.gateResult : "INVALID_OUTPUT" }
+      });
       generationResult = await provider.generateProductWiki(
         { generationRunId: run.id, pageGroups: [pageGroup] },
         {
@@ -83,6 +99,21 @@ export async function writePageTask(run: GenerationRun, task: GenerationTask): P
     }
 
     await persistPageWrite({ run, task, page: checked.output.pages[0], pageGroup, qualityReport: checked.qualityReport, usageCalls });
+    await emitDebugEvent({
+      generationRunId: run.id,
+      stage: "page_writer",
+      eventType: "PAGE_WRITTEN",
+      message: "Wiki page written.",
+      payload: {
+        taskId: task.id,
+        taskType: task.taskType,
+        pageKey,
+        qualityGateResult: checked.qualityReport.gateResult,
+        statementCount: checked.output.generatedStatementCount,
+        statementWithEvidenceCount: checked.output.generatedStatementWithEvidenceCount,
+        aiCallCount: usageCalls.length
+      }
+    });
     return {
       ok: true,
       pageKey,

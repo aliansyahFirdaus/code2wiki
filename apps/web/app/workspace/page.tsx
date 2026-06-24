@@ -4,7 +4,9 @@ import { desc, eq } from "drizzle-orm";
 
 import { generationRuns, getDb, githubInstallations, repositories, wikiPages } from "@code2wiki/db";
 import { sanitizeErrorText } from "@code2wiki/shared";
+import { GenerationDebugger } from "../../components/generation-debugger";
 import { pagesByGenerationRun } from "../../lib/run-pages";
+import { generationStepState, nextActionLabel } from "../../lib/workspace-ui";
 import { formatCoverage } from "../../lib/wiki-blocks";
 
 export const dynamic = "force-dynamic";
@@ -76,16 +78,21 @@ export default async function WorkspacePage({ searchParams }: Props) {
                 <strong>{run.status}</strong>
                 <span style={mutedStyle}>{run.createdAt.toISOString()}</span>
               </div>
+              <p style={{ margin: "8px 0 0" }}>
+                <strong>Next action:</strong> {nextActionLabel(run.status)}
+              </p>
+              <Stepper status={run.status} />
               <p style={mutedStyle}>
-                FE {frontendRepository} · {run.frontendTag} ({run.frontendCommitSha.slice(0, 12)}) ·{" "}
+                <RoleLabel role="FE" /> {frontendRepository} · {run.frontendTag} ({run.frontendCommitSha.slice(0, 12)}) ·{" "}
                 {formatCoverage({ indexed: run.frontendIndexedEligibleFiles, total: run.frontendTotalEligibleFiles })}
               </p>
               <p style={mutedStyle}>
-                BE {backendRepository} · {run.backendTag} ({run.backendCommitSha.slice(0, 12)}) ·{" "}
+                <RoleLabel role="BE" /> {backendRepository} · {run.backendTag} ({run.backendCommitSha.slice(0, 12)}) ·{" "}
                 {formatCoverage({ indexed: run.backendIndexedEligibleFiles, total: run.backendTotalEligibleFiles })}
               </p>
               {run.errorMessage ? <p style={errorStyle}>{sanitizeErrorText(run.errorMessage)}</p> : null}
               <WikiLinks pages={data.pagesByRun.get(run.id) ?? []} />
+              <GenerationDebugger generationRunId={run.id} />
             </article>
           );
         })}
@@ -141,7 +148,26 @@ function WikiLinks({ pages }: { pages: Array<typeof wikiPages.$inferSelect> }) {
   );
 }
 
+function RoleLabel({ role }: { role: "FE" | "BE" }) {
+  return <span style={{ ...roleStyle, background: role === "FE" ? "#eef2ff" : "#ecfdf5", color: role === "FE" ? "#3730a3" : "#047857" }}>{role}</span>;
+}
+
+function Stepper({ status }: { status: (typeof generationRuns.$inferSelect)["status"] }) {
+  return (
+    <div style={stepperStyle}>
+      {generationStepState(status).map((step) => (
+        <span key={step.label} style={{ ...stepStyle, borderColor: step.state === "active" ? "#2563eb" : "#e5e7eb", color: step.state === "pending" ? "#6b7280" : "#111827", background: step.state === "done" ? "#f3f4f6" : "#fff" }}>
+          {step.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 const pageStyle = { display: "grid", gap: 24, margin: "0 auto", maxWidth: 960, padding: 24 };
 const cardStyle = { border: "1px solid #e5e7eb", borderRadius: 8, padding: 16 };
 const mutedStyle = { color: "#6b7280", margin: 0 };
 const errorStyle = { color: "#b91c1c", margin: 0 };
+const roleStyle = { borderRadius: 6, display: "inline-block", fontSize: 12, fontWeight: 700, padding: "1px 6px" };
+const stepperStyle = { display: "flex", flexWrap: "wrap" as const, gap: 6, margin: "10px 0" };
+const stepStyle = { border: "1px solid #e5e7eb", borderRadius: 999, fontSize: 12, padding: "3px 8px" };

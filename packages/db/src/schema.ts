@@ -178,6 +178,28 @@ export const generationRuns = pgTable(
   })
 );
 
+export const generationDebugEvents = pgTable(
+  "generation_debug_events",
+  {
+    id: text("id").primaryKey(),
+    generationRunId: text("generation_run_id").notNull(),
+    stage: text("stage").notNull(),
+    eventType: text("event_type").notNull(),
+    severity: text("severity").notNull(),
+    message: text("message").notNull(),
+    payloadJson: jsonb("payload_json").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    generationRunIdx: index("generation_debug_events_run_idx").on(table.generationRunId),
+    generationRunOrderedIdx: index("generation_debug_events_run_ordered_idx").on(
+      table.generationRunId,
+      table.createdAt,
+      table.id
+    )
+  })
+);
+
 export const codeFacts = pgTable("code_facts", {
   id: text("id").primaryKey(),
   generationRunId: text("generation_run_id").notNull(),

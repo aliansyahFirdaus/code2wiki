@@ -92,6 +92,13 @@
       "when": 1782294500000,
       "tag": "0012_wiki_run_pages",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1782299059713,
+      "tag": "0014_generation_debug_events",
+      "breakpoints": true
     }
   ]
 }
