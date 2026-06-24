@@ -1,6 +1,7 @@
 import type { ProductWikiBlock } from "@code2wiki/document";
 
-import { blockBadges, getEditableText, getEvidenceIds, isEditableBlock } from "../../lib/wiki-blocks";
+import { blockBadges, getEditableText, getEvidenceIds, isEditableBlock, sourceBadge } from "../../lib/wiki-blocks";
+import styles from "./wiki-reader.module.css";
 
 type Props = {
   block: ProductWikiBlock;
@@ -14,43 +15,31 @@ type Props = {
 export function BlockRenderer({ block, selectedBlockId, onSelectBlock, editing, localText, onEditText }: Props) {
   const clickable = (block.origin === "CODE" || block.origin === "CODE_EDITED") && getEvidenceIds(block).length > 0;
   const active = selectedBlockId === block.id;
+  const evidenceCount = getEvidenceIds(block).length;
+  const badges = blockBadges(block).filter((badge) => !badge.endsWith("source") && !badge.endsWith("sources"));
 
   return (
-    <section
-      style={{
-        borderLeft: active ? "3px solid #2563eb" : "3px solid transparent",
-        paddingLeft: 12
-      }}
-    >
-      <div style={{ alignItems: "flex-start", display: "flex", gap: 8 }}>
+    <section className={`${styles.block} ${active ? styles.blockActive : ""}`}>
+      <div className={styles.blockRow}>
         <BlockText block={block} editing={editing} localText={localText} onEditText={onEditText} />
-        <button
-          type="button"
-          disabled={!clickable}
-          onClick={() => onSelectBlock(block)}
-          style={{
-            background: clickable ? "#eff6ff" : "#f3f4f6",
-            border: "1px solid #d1d5db",
-            borderRadius: 999,
-            color: clickable ? "#1d4ed8" : "#6b7280",
-            cursor: clickable ? "pointer" : "default",
-            fontSize: 12,
-            padding: "3px 8px"
-          }}
-        >
-          Sources
-        </button>
-        {blockBadges(block).map((badge) => (
-          <span
-            key={badge}
-            style={{ background: "#f3f4f6", border: "1px solid #d1d5db", borderRadius: 999, color: "#374151", fontSize: 12, padding: "3px 8px" }}
+        <div className={styles.blockChrome}>
+          <button
+            type="button"
+            disabled={!clickable}
+            onClick={() => onSelectBlock(block)}
+            className={styles.sourceButton}
           >
-            {badge}
-          </span>
-        ))}
+            {evidenceCount > 0 ? `${evidenceCount} ${evidenceCount === 1 ? "source" : "sources"}` : sourceBadge(block)}
+          </button>
+          {badges.map((badge) => (
+            <span key={badge} className={`${styles.badge} ${badge === "CODE_EDITED" ? styles.editedBadge : ""}`}>
+              {badge.replace(/_/g, " ")}
+            </span>
+          ))}
+        </div>
       </div>
       {block.children?.length ? (
-        <div style={{ display: "grid", gap: 12, marginTop: 12, paddingLeft: 16 }}>
+        <div className={styles.children}>
           {block.children.map((child) => (
             <BlockRenderer
               key={child.id}
@@ -86,26 +75,33 @@ function BlockText({
         value={localText[block.id] ?? getEditableText(block)}
         onChange={(event) => onEditText(block.id, event.target.value)}
         rows={block.type === "open_question" ? 2 : 3}
-        style={{ flex: 1, font: "inherit", minWidth: 0, padding: 8 }}
+        className={styles.textarea}
       />
     );
   }
 
   switch (block.type) {
     case "title":
-      return <h1 style={{ fontSize: 28, margin: 0 }}>{block.text}</h1>;
+      return <h2 className={styles.titleBlock}>{block.text}</h2>;
     case "heading":
-      return <h2 style={{ fontSize: block.level === 1 ? 24 : 20, margin: 0 }}>{block.text}</h2>;
+      return <h3 className={styles.headingBlock}>{block.text}</h3>;
     case "paragraph":
+      return <p className={styles.paragraphBlock}>{block.text}</p>;
     case "statement":
-      return <p style={{ margin: 0 }}>{block.text}</p>;
+      return <p className={styles.statementBlock}>{block.text}</p>;
     case "callout":
-      return <p style={{ margin: 0 }}>{block.text}</p>;
+      return <p className={styles.calloutBlock}>{block.text}</p>;
     case "open_question":
-      return <p style={{ margin: 0 }}>{block.question}</p>;
+      return (
+        <p className={styles.questionBlock}>
+          {block.question}
+          <br />
+          <span>{block.reason}</span>
+        </p>
+      );
     case "related_page":
-      return <p style={{ margin: 0 }}>{block.title}</p>;
+      return <p className={styles.relatedBlock}>{block.title}</p>;
     case "divider":
-      return <hr style={{ flex: 1 }} />;
+      return <hr className={styles.dividerBlock} />;
   }
 }

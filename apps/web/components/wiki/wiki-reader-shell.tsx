@@ -9,6 +9,7 @@ import { collectChangedEdits, flattenBlocks, getEditableText, getEvidenceIds, is
 import { LeftSidebar } from "../layout/left-sidebar";
 import { RightSidebar, type EvidenceItem, type GenerationRunSummary } from "../layout/right-sidebar";
 import { WikiEditor } from "./wiki-editor";
+import styles from "./wiki-reader.module.css";
 
 type WikiPageItem = {
   id: string;
@@ -16,6 +17,8 @@ type WikiPageItem = {
   slug: string;
   pageKey: string;
   parentPageId: string | null;
+  generationStrategy?: string | null;
+  reusedFromGenerationRunId?: string | null;
 };
 
 type Props = {
@@ -37,6 +40,7 @@ export function WikiReaderShell({ currentPageId, pages, blocks, generationRun }:
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const blockById = useMemo(() => new Map(flattenBlocks(blocks).map((block) => [block.id, block])), [blocks]);
   const changedEdits = useMemo(() => collectChangedEdits(blocks, localText), [blocks, localText]);
+  const currentPage = pages.find((page) => page.id === currentPageId) ?? null;
 
   useEffect(() => {
     setLocalText(Object.fromEntries(flattenBlocks(blocks).filter(isEditableBlock).map((block) => [block.id, getEditableText(block)])));
@@ -106,9 +110,11 @@ export function WikiReaderShell({ currentPageId, pages, blocks, generationRun }:
   }
 
   return (
-    <main style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr) 320px", minHeight: "100vh" }}>
+    <main className={styles.shell}>
       <LeftSidebar pages={pages} currentPageId={currentPageId} />
       <WikiEditor
+        page={currentPage}
+        generationRun={generationRun}
         blocks={blocks}
         selectedBlockId={selectedBlockId}
         onSelectBlock={selectBlock}

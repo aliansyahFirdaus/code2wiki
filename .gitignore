@@ -6,3 +6,5 @@ coverage
 .env.local
 .turbo
 *.tsbuildinfo
+# CocoIndex Code (ccc)
+/.cocoindex_code/

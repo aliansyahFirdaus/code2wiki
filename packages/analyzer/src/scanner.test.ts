@@ -24,6 +24,9 @@ describe("scanCode", () => {
     await write(root, "generated/client.ts", "fetch('/api/nope')");
     await write(root, "src/generated-file.ts", "// @generated\nfetch('/api/nope')");
     await write(root, "src/binary.ts", "hello\0world");
+    await write(root, ".code2wikiignore", "ignored-by-code2wiki/\nAGENTS.md\n");
+    await write(root, "ignored-by-code2wiki/page.tsx", "fetch('/api/nope')");
+    await write(root, "AGENTS.md", "fetch('/api/nope')");
 
     const result = await scanCode({ repositoryRole: "FRONTEND", repositoryRoot: root });
 
@@ -101,6 +104,121 @@ describe("scanCode", () => {
     expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "DATABASE_ENTITY" })]));
     expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "PERMISSION_CHECK" })]));
     expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "ERROR_RESPONSE" })]));
+  });
+
+  it("indexes Go backend files", async () => {
+    const root = await makeTempRoot();
+    await write(
+      root,
+      "internal/payroll/handler.go",
+      [
+        "package payroll",
+        "func RegisterRoutes(router *gin.Engine) {",
+        "  router.POST(\"/payroll/recalculate\", RecalculatePayroll)",
+        "}",
+        "func RecalculatePayroll(c *gin.Context) {",
+        "  if !isAdmin(c) { c.AbortWithStatusJSON(http.StatusForbidden, gin.H{\"error\":\"forbidden\"}); return }",
+        "  if err := c.ShouldBind(&request); err != nil { c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{\"error\":\"bad request\"}); return }",
+        "  db.Where(\"vessel_id = ?\", request.VesselID).Find(&rows)",
+        "}"
+      ].join("\n")
+    );
+
+    const backend = await scanCode({ repositoryRole: "BACKEND", repositoryRoot: root });
+
+    expect(backend.totalEligibleFiles).toBe(1);
+    expect(backend.indexedEligibleFiles).toBe(1);
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "API_ROUTE" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "CONTROLLER_HANDLER" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "VALIDATION_RULE" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "DATABASE_ENTITY" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "PERMISSION_CHECK" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "ERROR_RESPONSE" })]));
+  });
+
+  it("filters scan scope by keyword across path and content", async () => {
+    const root = await makeTempRoot();
+    await write(root, "internal/payroll/handler.go", "func RecalculatePayroll() { db.Where(\"status = ?\", \"queued\").Find(&runs) }");
+    await write(root, "internal/billing/handler.go", "func CreateInvoice() { db.Where(\"status = ?\", \"queued\").Find(&runs) }");
+    await write(root, "internal/services/compensation.go", "func SyncCompensation() { RecalculatePayroll() }");
+
+    const backend = await scanCode({ repositoryRole: "BACKEND", repositoryRoot: root, keywordFilter: ["payroll"] });
+
+    expect(backend.totalEligibleFiles).toBe(2);
+    expect(backend.indexedEligibleFiles).toBe(2);
+    expect(new Set(backend.evidence.map((item) => item.filePath))).toEqual(new Set(["internal/payroll/handler.go", "internal/services/compensation.go"]));
+  });
+
+  it("anchors tab components to their parent route", async () => {
+    const root = await makeTempRoot();
+    await write(
+      root,
+      "src/app/payroll/[vesselId]/[year]/[month]/_components/InsuranceTab.tsx",
+      "export function InsuranceTab() {\nreturn <TableHead>Insurance</TableHead>;\n}\n"
+    );
+
+    const frontend = await scanCode({ repositoryRole: "FRONTEND", repositoryRoot: root, keywordFilter: ["insurance"] });
+
+    expect(frontend.facts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          factKind: "PAGE_COMPONENT",
+          text: "Tab component for /payroll/[vesselId]/[year]/[month]/insurance"
+        })
+      ])
+    );
+  });
+
+  it("indexes backend SQL and worker files", async () => {
+    const root = await makeTempRoot();
+    await write(
+      root,
+      "migrations/001_create_payroll.sql",
+      [
+        "CREATE TABLE payroll_runs (",
+        "  id uuid PRIMARY KEY,",
+        "  vessel_id uuid NOT NULL REFERENCES vessels(id),",
+        "  status text NOT NULL CHECK (status <> '')",
+        ");"
+      ].join("\n")
+    );
+    await write(
+      root,
+      "internal/workers/payroll_worker.go",
+      [
+        "package workers",
+        "func ProcessPayrollQueue(ctx context.Context) {",
+        "  db.Where(\"status = ?\", \"queued\").Find(&runs)",
+        "}"
+      ].join("\n")
+    );
+
+    const backend = await scanCode({ repositoryRole: "BACKEND", repositoryRoot: root });
+
+    expect(backend.totalEligibleFiles).toBe(2);
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "DATABASE_ENTITY" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "VALIDATION_RULE" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "SERVICE_METHOD" })]));
+  });
+
+  it("does not require a language-specific extension whitelist", async () => {
+    const root = await makeTempRoot();
+    await write(
+      root,
+      "src/routes/payroll.rs",
+      [
+        "pub fn recalculate_payroll() {",
+        "  if !has_permission { return StatusCode::FORBIDDEN; }",
+        "  sqlx::query!(\"UPDATE payroll SET status = 'done'\");",
+        "}"
+      ].join("\n")
+    );
+
+    const backend = await scanCode({ repositoryRole: "BACKEND", repositoryRoot: root });
+
+    expect(backend.totalEligibleFiles).toBe(1);
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "DATABASE_ENTITY" })]));
+    expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "PERMISSION_CHECK" })]));
   });
 });
 

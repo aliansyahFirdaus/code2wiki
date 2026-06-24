@@ -21,9 +21,20 @@ describe("product wiki prompts", () => {
   it("forbids markdown canonical output", () => {
     const text = messageText(buildProductWikiMessages(input()));
 
-    expect(text).toContain("Output JSON only");
+    expect(text).toContain("Return ONLY one JSON object");
     expect(text).toContain("Do not output markdown");
     expect(text).toContain("no markdown");
+  });
+
+  it("spells out the ProductWiki JSON shape for weak schema providers", () => {
+    const text = messageText(buildProductWikiMessages(input()));
+
+    expect(text).toContain("top-level object MUST use exactly this shape");
+    expect(text).toContain("Never use top-level keys such as wikiBlocks");
+    expect(text).toContain("Each block MUST contain type");
+    expect(text).toContain("Use block.type, never blockType");
+    expect(text).toContain("Use evidenceIds as an array of strings, never evidenceReferences");
+    expect(text).toContain("Valid minimal example");
   });
 
   it("forbids invented evidence IDs", () => {
@@ -45,6 +56,8 @@ describe("product wiki prompts", () => {
 
     expect(text).toContain("Write user-facing product stories, not implementation explanations");
     expect(text).toContain("Write product knowledge, not implementation trivia");
+    expect(text).toContain("Write complete product docs, not terse bullet dumps");
+    expect(text).toContain("Make the page read like a clear feature story");
     expect(text).toContain("Do not use technical implementation terms");
     expect(text).toContain("Prefer flows, business rules, validations, permissions, side effects, error states, and dependencies over code trivia");
     expect(text).not.toContain("API contracts");
@@ -93,7 +106,7 @@ describe("product wiki prompts", () => {
     });
     expect(body.response_format.json_schema.schema.properties.pages.items.properties.blocks.items).toEqual({ $ref: "#/$defs/block" });
     expect(body.provider).toEqual({ require_parameters: true });
-    expect(body.temperature).toBe(0.2);
+    expect(body.temperature).toBe(0);
   });
 
   it("OpenRouterProvider sends one generation call and one optional repair call per invocation", async () => {

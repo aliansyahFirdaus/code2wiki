@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { RepositoryRole } from "@code2wiki/shared";
@@ -7,14 +8,45 @@ import type { RepositoryRole } from "@code2wiki/shared";
 import type { ScannerEvidence, EvidenceSourceKind } from "./evidence";
 import type { ScannerFact, ScannerFactKind } from "./facts";
 
-const eligibleExtensions = new Set([".ts", ".tsx", ".js", ".jsx"]);
-const ignoredDirectories = new Set(["node_modules", ".next", "dist", "build", "coverage", ".git", "__generated__", "generated"]);
+const maxFileBytes = 1_000_000;
+const ignoredDirectories = new Set(["node_modules", ".next", "dist", "build", "coverage", ".git", "__generated__", "generated", "vendor"]);
 const lockFiles = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"]);
+const ignoredExtensions = new Set([
+  ".7z",
+  ".avif",
+  ".bmp",
+  ".br",
+  ".crt",
+  ".eot",
+  ".gif",
+  ".gz",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".key",
+  ".lock",
+  ".map",
+  ".mp3",
+  ".mp4",
+  ".otf",
+  ".pdf",
+  ".png",
+  ".snap",
+  ".svg",
+  ".tar",
+  ".ttf",
+  ".webm",
+  ".webp",
+  ".woff",
+  ".woff2",
+  ".zip"
+]);
 const meaningfulStateNames = /(loading|error|success|empty|modal|open|disabled)/i;
 
 export type ScanCodeInput = {
   repositoryRole: RepositoryRole;
   repositoryRoot: string;
+  keywordFilter?: string[];
 };
 
 export type ScanCodeResult = {
@@ -33,6 +65,7 @@ type FileScanContext = {
 
 export async function scanCode(input: ScanCodeInput): Promise<ScanCodeResult> {
   const candidateFiles = await collectCandidateFiles(input.repositoryRoot);
+  const keywordFilter = normalizeKeywordFilter(input.keywordFilter);
   const evidenceByKey = new Map<string, ScannerEvidence>();
   const factsByKey = new Map<string, ScannerFact>();
   let totalEligibleFiles = 0;
@@ -43,6 +76,10 @@ export async function scanCode(input: ScanCodeInput): Promise<ScanCodeResult> {
     const content = await readFile(absolutePath, "utf8");
 
     if (isBinaryContent(content) || hasGeneratedHeader(content)) {
+      continue;
+    }
+
+    if (keywordFilter.length > 0 && !matchesKeywordFilter(filePath, content, keywordFilter)) {
       continue;
     }
 
@@ -81,8 +118,18 @@ export async function scanCode(input: ScanCodeInput): Promise<ScanCodeResult> {
   };
 }
 
+function normalizeKeywordFilter(keywords?: string[]) {
+  return [...new Set((keywords ?? []).map((keyword) => keyword.trim().toLowerCase()).filter(Boolean))];
+}
+
+function matchesKeywordFilter(filePath: string, content: string, keywords: string[]) {
+  const haystack = `${filePath}\n${content}`.toLowerCase();
+  return keywords.some((keyword) => haystack.includes(keyword));
+}
+
 async function collectCandidateFiles(root: string) {
   const files: string[] = [];
+  const ignoredByFile = await readCode2WikiIgnore(root);
 
   async function walk(relativeDirectory: string) {
     const absoluteDirectory = relativeDirectory ? path.join(root, ...relativeDirectory.split("/")) : root;
@@ -92,13 +139,13 @@ async function collectCandidateFiles(root: string) {
       const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
 
       if (entry.isDirectory()) {
-        if (!ignoredDirectories.has(entry.name)) {
+        if (!ignoredDirectories.has(entry.name) && !isIgnoredByFile(`${relativePath}/`, ignoredByFile)) {
           await walk(relativePath);
         }
         continue;
       }
 
-      if (entry.isFile() && isEligibleSourceFile(relativePath)) {
+      if (entry.isFile() && isEligibleSourceFile(relativePath, ignoredByFile) && (await stat(path.join(root, ...relativePath.split("/")))).size <= maxFileBytes) {
         files.push(relativePath);
       }
     }
@@ -108,19 +155,88 @@ async function collectCandidateFiles(root: string) {
   return files.sort();
 }
 
-function isEligibleSourceFile(filePath: string) {
+async function readCode2WikiIgnore(root: string) {
+  const paths = [...new Set([path.join(root, ".code2wikiignore"), projectIgnorePath()].filter(isDefined))];
+  const patterns: string[] = [];
+  for (const filePath of paths) {
+    try {
+      const content = await readFile(filePath, "utf8");
+      patterns.push(
+        ...content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+          .map((line) => line.replace(/^\/+/, ""))
+      );
+    } catch {
+      // Ignore files are optional.
+    }
+  }
+  return [...new Set(patterns)];
+}
+
+function isEligibleSourceFile(filePath: string, ignoredByFile: string[]) {
   const basename = path.posix.basename(filePath);
   const extension = path.posix.extname(filePath);
 
-  if (!eligibleExtensions.has(extension)) {
+  if (isIgnoredByFile(filePath, ignoredByFile)) {
     return false;
   }
 
-  if (lockFiles.has(basename) || basename.endsWith(".d.ts") || basename.endsWith(".min.js")) {
+  if (ignoredExtensions.has(extension.toLowerCase())) {
+    return false;
+  }
+
+  if (basename.startsWith(".") || lockFiles.has(basename) || basename.endsWith(".d.ts") || basename.endsWith(".min.js")) {
     return false;
   }
 
   return !/(^|[.-])generated\./i.test(basename);
+}
+
+function isIgnoredByFile(filePath: string, patterns: string[]) {
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const basename = path.posix.basename(normalized.replace(/\/$/, ""));
+  return patterns.some((pattern) => {
+    const clean = pattern.replace(/^\/+/, "");
+    if (clean.endsWith("/")) {
+      return normalized.startsWith(clean);
+    }
+    if (!clean.includes("/")) {
+      return basename === clean || globMatch(basename, clean);
+    }
+    return normalized === clean || normalized.startsWith(`${clean}/`) || globMatch(normalized, clean);
+  });
+}
+
+function globMatch(value: string, pattern: string) {
+  if (!pattern.includes("*")) {
+    return value === pattern;
+  }
+  const regex = new RegExp(`^${pattern.split("*").map(escapeRegex).join(".*")}$`);
+  return regex.test(value);
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function projectIgnorePath() {
+  let current = process.cwd();
+  while (true) {
+    const candidate = path.join(current, ".code2wikiignore");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    if (current === path.dirname(current)) {
+      return undefined;
+    }
+    current = path.dirname(current);
+  }
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }
 
 function hasGeneratedHeader(content: string) {
@@ -178,9 +294,22 @@ function addPathDerivedCandidates(
     add("PAGE_COMPONENT", "COMPONENT", meaningfulLine, `Page component for ${route}`, `Page component for ${route}`, 0.9);
   }
 
+  if (context.repositoryRole === "FRONTEND" && isFrontendTabComponentFile(context.filePath)) {
+    const route = tabRouteFromFilePath(context.filePath);
+    add("PAGE_COMPONENT", "COMPONENT", meaningfulLine, `Page component for ${route}`, `Tab component for ${route}`, 0.85);
+  }
+
   if (context.repositoryRole === "BACKEND" && isBackendApiRouteFile(context.filePath)) {
     const route = routeFromFilePath(context.filePath);
     add("API_ROUTE", "ROUTE", meaningfulLine, `Backend API route ${route}`, `Backend API route ${route}`, 0.95);
+  }
+
+  if (context.repositoryRole === "BACKEND" && /\.(sql|prisma)$/.test(context.filePath)) {
+    add("DATABASE_ENTITY", "MODEL", meaningfulLine, "Backend data definition", `Data definition ${cleanText(context.lines[meaningfulLine] ?? context.filePath)}`, 0.9);
+  }
+
+  if (context.repositoryRole === "BACKEND" && /\b(workers?|jobs?|cron|queue|consumer|subscriber|scheduler|services?)\b/i.test(context.filePath)) {
+    add("SERVICE_METHOD", "SERVICE", meaningfulLine, "Backend background/service behavior", `Background or service behavior ${cleanText(context.lines[meaningfulLine] ?? context.filePath)}`, 0.85);
   }
 }
 
@@ -232,27 +361,35 @@ function addBackendLineCandidates(
     add("API_ROUTE", "ROUTE", lineIndex, "Backend API route registration", `Backend route ${cleanText(trimmed)}`, 0.95);
   }
 
+  if (/\b(?:GET|POST|PUT|PATCH|DELETE)\s*\(\s*["'`][^"'`]+["'`]/.test(trimmed) || /\b(?:HandleFunc|Handle)\s*\(\s*["'`][^"'`]+["'`]/.test(trimmed)) {
+    add("API_ROUTE", "ROUTE", lineIndex, "Backend API route registration", `Backend route ${cleanText(trimmed)}`, 0.95);
+  }
+
   if (/\bexport\s+(?:async\s+)?function\s+(?:GET|POST|PUT|PATCH|DELETE)\b/.test(trimmed) || /\bexport\s+const\s+(?:GET|POST|PUT|PATCH|DELETE)\b/.test(trimmed)) {
     add("CONTROLLER_HANDLER", "HANDLER", lineIndex, "Backend controller handler", `Controller handler ${cleanText(trimmed)}`, 0.95);
   }
 
-  if (/service/i.test(filePath) && /\bexport\s+(?:async\s+)?(?:function|class|const)\s+[A-Za-z0-9_]+/.test(trimmed)) {
+  if (/\bfunc\s+(?:\([^)]+\)\s*)?[A-Z][A-Za-z0-9_]*\s*\(/.test(trimmed)) {
+    add("CONTROLLER_HANDLER", "HANDLER", lineIndex, "Backend controller handler", `Controller handler ${cleanText(trimmed)}`, 0.9);
+  }
+
+  if (/\b(?:services?|workers?|jobs?|cron|queue|consumer|subscriber|scheduler)\b/i.test(filePath) && (/\bexport\s+(?:async\s+)?(?:function|class|const)\s+[A-Za-z0-9_]+/.test(trimmed) || /\bfunc\s+(?:\([^)]+\)\s*)?[A-Z][A-Za-z0-9_]*\s*\(/.test(trimmed))) {
     add("SERVICE_METHOD", "SERVICE", lineIndex, "Backend service method", `Service method ${cleanText(trimmed)}`, 0.8);
   }
 
-  if (/\b(?:z\.object|z\.string|yup\.|Joi\.|required|min|max|pattern)\b/.test(trimmed)) {
+  if (/\b(?:z\.object|z\.string|yup\.|Joi\.|required|min|max|pattern|binding:"required|validate:"required|ShouldBind|BindJSON|NOT NULL|CHECK\s*\(|REFERENCES)\b/i.test(trimmed)) {
     add("VALIDATION_RULE", "VALIDATION", lineIndex, "Backend validation rule", `Validation rule ${cleanText(trimmed)}`, 0.9);
   }
 
-  if (/\b(?:pgTable|model\s+[A-Z]|schema\s*=|prisma\.|db\.(?:select|insert|update|delete|query))\b/.test(trimmed)) {
+  if (/\b(?:pgTable|model\s+[A-Z]|schema\s*=|prisma\.|db\.(?:select|insert|update|delete|query)|CREATE\s+(?:TABLE|INDEX|VIEW)|ALTER\s+TABLE|SELECT\s+|INSERT\s+|UPDATE\s+|DELETE\s+)/i.test(trimmed) || /\.(?:Where|Find|Create|Save|Delete)\(/.test(trimmed)) {
     add("DATABASE_ENTITY", "MODEL", lineIndex, "Backend database entity", `Database entity ${cleanText(trimmed)}`, 0.9);
   }
 
-  if (/\b(?:auth|session|role|permission|requireAuth|isAdmin)\b/.test(trimmed)) {
+  if (/(?:auth|session|role|permission|requireAuth|isAdmin|middleware|token|jwt|claims)/i.test(trimmed)) {
     add("PERMISSION_CHECK", "PERMISSION", lineIndex, "Backend permission check", `Permission check ${cleanText(trimmed)}`, 0.9);
   }
 
-  if (/\b(?:status\s*:\s*[45]\d\d|\.status\(\s*[45]\d\d|NextResponse\.json\([^)]*\{\s*status\s*:\s*[45]\d\d)/.test(trimmed)) {
+  if (/\b(?:status\s*:\s*[45]\d\d|\.status\(\s*[45]\d\d|NextResponse\.json\([^)]*\{\s*status\s*:\s*[45]\d\d|Status(?:BadRequest|Unauthorized|Forbidden|NotFound|InternalServerError)|AbortWithStatusJSON)\b/.test(trimmed)) {
     add("ERROR_RESPONSE", "HANDLER", lineIndex, "Backend error response", `Error response ${cleanText(trimmed)}`, 0.9);
   }
 }
@@ -299,6 +436,10 @@ function isFrontendRouteFile(filePath: string) {
   return /(^|\/)app\/(?:.*\/)?page\.(tsx|jsx|ts|js)$/.test(filePath) || /(^|\/)pages\/.+\.(tsx|jsx|ts|js)$/.test(filePath);
 }
 
+function isFrontendTabComponentFile(filePath: string) {
+  return /(^|\/)_components\/[A-Z][A-Za-z0-9]*Tab\.(tsx|jsx|ts|js)$/.test(filePath);
+}
+
 function isBackendApiRouteFile(filePath: string) {
   return /(^|\/)app\/api\/(?:.*\/)?route\.(ts|js)$/.test(filePath) || /(^|\/)pages\/api\/.+\.(ts|js)$/.test(filePath);
 }
@@ -316,6 +457,19 @@ function routeFromFilePath(filePath: string) {
     .replace(/\/index$/, "")
     .replace(/^index$/, "")
     .replace(/\([^)]*\)\//g, "")}`;
+}
+
+function tabRouteFromFilePath(filePath: string) {
+  const tabName = path.posix.basename(filePath).replace(/Tab\.(tsx|jsx|ts|js)$/, "");
+  const parentPagePath = filePath.replace(/\/_components\/[^/]+Tab\.(tsx|jsx|ts|js)$/, "/page.tsx");
+  return `${routeFromFilePath(parentPagePath)}/${kebabCase(tabName)}`;
+}
+
+function kebabCase(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[\s_]+/g, "-")
+    .toLowerCase();
 }
 
 function withEvidenceKey(evidence: MutableEvidence): ScannerEvidence {

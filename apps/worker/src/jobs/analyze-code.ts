@@ -69,14 +69,17 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
     });
     checkouts.push(backendCheckout);
 
+    const keywordFilter = scanKeywordFilterFromEnv();
     const [frontendScan, backendScan] = await Promise.all([
       scanCode({
         repositoryRole: frontendRepository.role,
-        repositoryRoot: frontendCheckout.path
+        repositoryRoot: frontendCheckout.path,
+        keywordFilter
       }),
       scanCode({
         repositoryRole: backendRepository.role,
-        repositoryRoot: backendCheckout.path
+        repositoryRoot: backendCheckout.path,
+        keywordFilter
       })
     ]);
 
@@ -110,8 +113,10 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
       await tx.delete(codeFacts).where(eq(codeFacts.generationRunId, claimedRun.id));
       await tx.delete(evidenceTable).where(eq(evidenceTable.generationRunId, claimedRun.id));
 
-      if (evidenceRows.length > 0) {
-        await tx.insert(evidenceTable).values(evidenceRows.map(({ evidenceKey, ...row }) => row));
+      for (const chunk of chunks(evidenceRows.map(({ evidenceKey, ...row }) => row), 500)) {
+        if (chunk.length > 0) {
+          await tx.insert(evidenceTable).values(chunk);
+        }
       }
 
       const frontendEvidenceKeys = new Set(frontendScan.evidence.map((item) => item.evidenceKey));
@@ -154,8 +159,10 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
         }))
       ].filter((row) => row.evidenceIds.length > 0);
 
-      if (codeFactRows.length > 0) {
-        await tx.insert(codeFacts).values(codeFactRows);
+      for (const chunk of chunks(codeFactRows, 500)) {
+        if (chunk.length > 0) {
+          await tx.insert(codeFacts).values(chunk);
+        }
       }
 
       const codeMap = buildCodeMap({
@@ -200,10 +207,10 @@ export async function analyzeCode(generationRunId?: string): Promise<AnalyzeCode
       }));
 
       await tx.delete(codeSummaries).where(eq(codeSummaries.generationRunId, claimedRun.id));
-      if (summaryRows.length > 0) {
+      for (const chunk of chunks(summaryRows, 250)) {
         await tx
           .insert(codeSummaries)
-          .values(summaryRows)
+          .values(chunk)
           .onConflictDoUpdate({
             target: [codeSummaries.generationRunId, codeSummaries.summaryType, codeSummaries.cacheKey],
             set: {
@@ -401,6 +408,21 @@ function resolveEvidenceIds(evidenceKeys: string[], evidenceIdByKey: Map<string,
     }
     return id;
   });
+}
+
+function chunks<T>(items: T[], size: number) {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
+}
+
+function scanKeywordFilterFromEnv() {
+  return (process.env.CODE2WIKI_SCAN_KEYWORDS ?? "")
+    .split(",")
+    .map((keyword) => keyword.trim())
+    .filter(Boolean);
 }
 
 async function cleanupCheckouts(checkouts: RepositoryCheckout[]) {

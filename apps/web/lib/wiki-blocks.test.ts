@@ -61,6 +61,19 @@ describe("wiki block reader helpers", () => {
     expect(sourceBadge(manual)).toBe("Manual");
   });
 
+  it("keeps source badges based on wiki_blocks evidenceIds only", () => {
+    const [block] = buildBlockTree([
+      row({
+        id: "db-source",
+        type: "statement",
+        evidenceIds: [],
+        blockJson: { type: "statement", text: "Statement", confidence: 1, evidenceIds: ["json-only"], lastGeneratedRunId: "run" }
+      })
+    ]);
+
+    expect(sourceBadge(block)).toBe("Needs review");
+  });
+
   it("formats missing and zero denominator coverage with explicit N/A reasons", () => {
     expect(formatCoverage({ indexed: null, total: null })).toBe("N/A - no data");
     expect(formatCoverage({ indexed: 0, total: 0 })).toBe("N/A - no eligible files");

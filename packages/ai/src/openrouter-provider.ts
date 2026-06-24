@@ -97,7 +97,7 @@ export class OpenRouterProvider implements AIProvider {
       },
       body: JSON.stringify({
         model,
-        temperature: 0.2,
+        temperature: 0,
         provider: {
           require_parameters: true
         },

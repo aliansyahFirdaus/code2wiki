@@ -68,7 +68,7 @@ export function pageKeyFromPath(filePath: string) {
     .replace(/\.(tsx|jsx|ts|js)$/, "")
     .replace(/\/index$/, "")
     .replace(/^\/+/, "");
-  return withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+  return normalizePageKey(withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
 }
 
 function evidenceFingerprintInput(item: Evidence) {
@@ -101,9 +101,18 @@ function pageKeyFromNode(node: Record<string, unknown>) {
   const metadata = node.metadata && typeof node.metadata === "object" ? (node.metadata as Record<string, unknown>) : {};
   const value = String(node.kind === "NAVIGATION" ? metadata.target ?? "" : metadata.path ?? node.filePath ?? "");
   if (value.startsWith("/")) {
-    return value.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+    return normalizePageKey(value.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
   }
   return pageKeyFromPath(value);
+}
+
+function normalizePageKey(value: string) {
+  return value
+    .replace(/\$\{[^}]+\}/g, "id")
+    .replace(/\[[^\]]+\]/g, "id")
+    .replace(/\s+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
 }
 
 function compareJson(left: unknown, right: unknown) {

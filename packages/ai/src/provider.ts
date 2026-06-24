@@ -23,6 +23,7 @@ export type GenerateProductWikiEvidence = {
   endLine: number;
   sourceKind: string;
   summary: string;
+  codeSnippet?: string;
   githubUrl: string;
 };
 

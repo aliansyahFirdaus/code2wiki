@@ -329,7 +329,16 @@ function isFrontendSurfaceNode(node: Record<string, unknown>) {
 function pageKeyFromNode(node: Record<string, unknown>) {
   const metadata = node.metadata && typeof node.metadata === "object" ? (node.metadata as Record<string, unknown>) : {};
   const raw = String(node.kind === "NAVIGATION" ? metadata.target ?? "" : metadata.path ?? node.filePath ?? "");
-  return raw.startsWith("/") ? raw.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".").toLowerCase() || "frontend" : pageKeyFromPath(raw);
+  return raw.startsWith("/") ? normalizePageKey(raw.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend" : pageKeyFromPath(raw);
+}
+
+function normalizePageKey(value: string) {
+  return value
+    .replace(/\$\{[^}]+\}/g, "id")
+    .replace(/\[[^\]]+\]/g, "id")
+    .replace(/\s+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
 }
 
 function wikiPageEvidenceId(generationRunId: string, pageKey: string, evidenceId: string, factId: string | null, coverageRole: string) {

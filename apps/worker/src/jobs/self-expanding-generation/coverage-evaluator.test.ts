@@ -141,7 +141,7 @@ describe("coverage evaluator", () => {
     const second = await evaluateCoverage(run(), task({ id: "task-2" }));
 
     expect(first.ok && second.ok && first.report.fingerprint).toBe(second.ok && second.report.fingerprint);
-    expect(second).toMatchObject({ ok: true, report: { acceptable: false, counts: { reviewGaps: 1 } } });
+    expect(second).toMatchObject({ ok: true, report: { acceptable: true, counts: { reviewGaps: 0, terminalNegativeCoverage: 1, uncovered: 0 } } });
     expect(db.pageEvidence).toHaveLength(1);
   });
 

@@ -2,10 +2,26 @@
 
 import type { ProductWikiBlock } from "@code2wiki/document";
 
+import { formatCoverage } from "../../lib/wiki-blocks";
+import { pageStatusLabel } from "../../lib/wiki-ui";
+import type { GenerationRunSummary } from "../layout/right-sidebar";
 import { BlockRenderer } from "./block-renderer";
 import { EnableEditingButton } from "./enable-editing-button";
+import styles from "./wiki-reader.module.css";
+
+type WikiPageItem = {
+  id: string;
+  title: string;
+  slug: string;
+  pageKey: string;
+  parentPageId: string | null;
+  generationStrategy?: string | null;
+  reusedFromGenerationRunId?: string | null;
+};
 
 type Props = {
+  page: WikiPageItem | null;
+  generationRun: GenerationRunSummary | null;
   blocks: ProductWikiBlock[];
   selectedBlockId: string | null;
   onSelectBlock: (block: ProductWikiBlock) => void;
@@ -21,6 +37,8 @@ type Props = {
 };
 
 export function WikiEditor({
+  page,
+  generationRun,
   blocks,
   selectedBlockId,
   onSelectBlock,
@@ -35,36 +53,81 @@ export function WikiEditor({
   saveError
 }: Props) {
   return (
-    <section style={{ padding: 24 }}>
-      <header style={{ alignItems: "center", display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-        <div style={{ color: "#6b7280", fontSize: 13 }}>{editing ? `${changedCount} unsaved edits` : "Read-only"}</div>
-        {editing ? (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={onCancelEditing} disabled={saving}>
-              Cancel
-            </button>
-            <button type="button" onClick={onSaveEditing} disabled={saving}>
-              {saving ? "Saving..." : "Save"}
-            </button>
+    <section className={styles.document}>
+      <div className={styles.documentInner}>
+        <header className={styles.docHeader}>
+          <div>
+            <h1 className={styles.docTitle}>{page?.title ?? "Untitled wiki page"}</h1>
+            <div className={styles.pageMeta}>
+              <span>{page?.pageKey ?? "missing-page-key"}</span>
+              <span>{page?.slug ?? "missing-slug"}</span>
+              {page ? <span className={styles.pageStatus}>{pageStatusLabel(page)}</span> : null}
+            </div>
           </div>
-        ) : (
-          <EnableEditingButton onClick={onEnableEditing} />
-        )}
-      </header>
-      {saveError ? <p style={{ color: "#b91c1c", margin: "0 0 16px" }}>{saveError}</p> : null}
-      <div style={{ display: "grid", gap: 12, marginTop: 24 }}>
-        {blocks.map((block) => (
-          <BlockRenderer
-            key={block.id}
-            block={block}
-            selectedBlockId={selectedBlockId}
-            onSelectBlock={onSelectBlock}
-            editing={editing}
-            localText={localText}
-            onEditText={onEditText}
-          />
-        ))}
+          <div className={styles.docMetaGrid}>
+            <Metric label="FE tag" value={generationRun?.frontendTag ?? "N/A"} />
+            <Metric label="BE tag" value={generationRun?.backendTag ?? "N/A"} />
+            <Metric
+              label="FE coverage"
+              value={formatCoverage({
+                indexed: generationRun?.frontendIndexedEligibleFiles,
+                total: generationRun?.frontendTotalEligibleFiles
+              })}
+            />
+            <Metric
+              label="Evidence coverage"
+              value={formatCoverage({
+                indexed: generationRun?.generatedStatementWithEvidenceCount,
+                total: generationRun?.generatedStatementCount
+              })}
+            />
+          </div>
+        </header>
+        <div className={styles.toolbar}>
+          <div className={styles.toolbarStatus}>
+            {editing ? `${changedCount} unsaved ${changedCount === 1 ? "edit" : "edits"}` : "Read-only"}
+          </div>
+          {editing ? (
+            <div className={styles.toolbarActions}>
+              <button type="button" onClick={onCancelEditing} disabled={saving} className={`${styles.button} ${styles.buttonSecondary}`}>
+                Cancel
+              </button>
+              <button type="button" onClick={onSaveEditing} disabled={saving} className={styles.button}>
+                {saving ? "Saving..." : "Save"}
+              </button>
+            </div>
+          ) : (
+            <EnableEditingButton onClick={onEnableEditing} />
+          )}
+        </div>
+        {saveError ? <p className={styles.errorBand}>{saveError}</p> : null}
+        <div className={styles.blocks}>
+          {blocks.length === 0 ? (
+            <p className={styles.emptyState}>No blocks generated for this page yet.</p>
+          ) : (
+            blocks.map((block) => (
+              <BlockRenderer
+                key={block.id}
+                block={block}
+                selectedBlockId={selectedBlockId}
+                onSelectBlock={onSelectBlock}
+                editing={editing}
+                localText={localText}
+                onEditText={onEditText}
+              />
+            ))
+          )}
+        </div>
       </div>
     </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className={styles.metric}>
+      <span className={styles.metricLabel}>{label}</span>
+      <span className={styles.metricValue}>{value}</span>
+    </div>
   );
 }

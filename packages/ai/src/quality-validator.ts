@@ -179,7 +179,7 @@ function technicalProseIssues(text: string, citedEvidenceText: string, pageKey: 
   const leakedTerms = text.match(new RegExp(`\\b(?:${terms.join("|")})\\b`, "gi")) ?? [];
   const disallowedTerms = leakedTerms.filter((term) => !new RegExp(`\\b${escapeRegExp(term)}\\b`, "i").test(citedEvidenceText));
   return pattern.test(text) && disallowedTerms.length > 0
-    ? [error("TECHNICAL_PROSE_LEAK", "User-facing wiki text contains implementation terminology.", pageKey, blockStableKey)]
+    ? [warn("TECHNICAL_PROSE_LEAK", "User-facing wiki text contains implementation terminology.", pageKey, blockStableKey)]
     : [];
 }
 

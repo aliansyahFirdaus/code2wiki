@@ -1,11 +1,16 @@
 import Link from "next/link";
 
+import { pageStatusLabel } from "../../lib/wiki-ui";
+import styles from "../wiki/wiki-reader.module.css";
+
 type WikiPageItem = {
   id: string;
   title: string;
   slug: string;
   pageKey: string;
   parentPageId: string | null;
+  generationStrategy?: string | null;
+  reusedFromGenerationRunId?: string | null;
 };
 
 type Props = {
@@ -17,13 +22,13 @@ export function LeftSidebar({ pages, currentPageId }: Props) {
   const roots = pages.filter((page) => !page.parentPageId).sort(comparePages);
 
   return (
-    <aside style={{ borderRight: "1px solid #e5e7eb", padding: 16 }}>
-      <h2 style={{ fontSize: 14, margin: "0 0 12px" }}>Wiki pages</h2>
+    <aside className={styles.leftRail}>
+      <h2 className={styles.railTitle}>Wiki pages</h2>
       <nav aria-label="Wiki pages">
         {roots.length === 0 ? (
-          <p style={{ color: "#6b7280", margin: 0 }}>No pages.</p>
+          <p className={styles.emptyState}>No wiki pages generated yet.</p>
         ) : (
-          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+          <ul className={styles.pageList}>
             {roots.map((page) => (
               <PageNode key={page.id} page={page} pages={pages} currentPageId={currentPageId} depth={0} />
             ))}
@@ -43,19 +48,17 @@ function PageNode({ page, pages, currentPageId, depth }: { page: WikiPageItem; p
       <Link
         href={`/wiki/${page.id}`}
         aria-current={active ? "page" : undefined}
-        style={{
-          color: active ? "#111827" : "#374151",
-          display: "block",
-          fontWeight: active ? 700 : 400,
-          padding: "6px 8px",
-          paddingLeft: 8 + depth * 16,
-          textDecoration: "none"
-        }}
+        className={`${styles.pageLink} ${active ? styles.pageLinkActive : ""}`}
+        style={{ marginLeft: depth * 14 }}
       >
-        {page.title}
+        <span className={styles.pageTitle}>{page.title}</span>
+        <span className={styles.pageMeta}>
+          <span className={styles.pageKey}>{page.pageKey || page.slug}</span>
+          <span className={styles.pageStatus}>{pageStatusLabel(page)}</span>
+        </span>
       </Link>
       {children.length > 0 ? (
-        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+        <ul className={styles.pageList}>
           {children.map((child) => (
             <PageNode key={child.id} page={child} pages={pages} currentPageId={currentPageId} depth={depth + 1} />
           ))}

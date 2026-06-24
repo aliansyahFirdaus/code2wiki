@@ -479,6 +479,7 @@ function toProviderEvidence(row: typeof evidence.$inferSelect): GenerateProductW
     endLine: row.endLine,
     sourceKind: row.sourceKind,
     summary: row.summary,
+    codeSnippet: row.codeSnippet,
     githubUrl: row.githubUrl
   };
 }
@@ -543,7 +544,16 @@ function pageKeyFromPath(filePath: string) {
     .replace(/\.(tsx|jsx|ts|js)$/, "")
     .replace(/\/index$/, "")
     .replace(/^\/+/, "");
-  return withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+  return normalizePageKey(withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
+}
+
+function normalizePageKey(value: string) {
+  return value
+    .replace(/\$\{[^}]+\}/g, "id")
+    .replace(/\[[^\]]+\]/g, "id")
+    .replace(/\s+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
 }
 
 function pageId(workspaceId: string, pageKey: string) {

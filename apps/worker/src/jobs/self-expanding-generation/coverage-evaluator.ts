@@ -79,23 +79,6 @@ export async function evaluateCoverage(run: GenerationRun, task: GenerationTask)
     const evaluation = buildCoverageReport(input);
     const db = getDb();
 
-    for (const gap of evaluation.gaps) {
-      await emitDebugEvent({
-        generationRunId: run.id,
-        stage: "coverage",
-        eventType: "COVERAGE_GAP_FOUND",
-        severity: gap.disposition === "NEEDS_REVIEW" ? "WARN" : "INFO",
-        message: "Coverage gap classified.",
-        payload: {
-          disposition: gap.disposition,
-          pageKey: gap.pageKey,
-          evidenceId: gap.evidenceId,
-          factId: gap.factId,
-          reason: gap.reason
-        }
-      });
-    }
-
     for (const gap of evaluation.gaps.filter((item) => item.disposition === "EXCLUDED_NO_WIKI_VALUE" || item.disposition === "NEEDS_REVIEW")) {
       const coverageRole = gap.disposition as "EXCLUDED_NO_WIKI_VALUE" | "NEEDS_REVIEW";
       await db
@@ -173,16 +156,7 @@ function buildCoverageReport(input: CoverageInput) {
   const terminalNegativeKeys = new Set(terminalRows.map(itemKey));
   const uncovered = items.filter((item) => !positiveKeys.has(itemKey(item)) && !terminalNegativeKeys.has(itemKey(item)));
   const pageKeys = new Set(input.pages.map((page) => page.pageKey));
-  const gaps = [
-    ...terminalRows.filter((row) => row.coverageRole === "NEEDS_REVIEW").map((row) => ({
-      disposition: "NEEDS_REVIEW" as const,
-      pageKey: row.pageKey,
-      evidenceId: row.evidenceId,
-      factId: row.factId,
-      reason: "NO_FRONTEND_ANCHOR"
-    })),
-    ...uncovered.map((item) => classifyGap(item, input.codeMapNodes, pageKeys))
-  ];
+  const gaps = uncovered.map((item) => classifyGap(item, input.codeMapNodes, pageKeys));
   const queued = gaps.filter((gap) => gap.disposition === "CREATE_PAGE" || gap.disposition === "UPDATE_PAGE").length;
   const reviewGaps = gaps.filter((gap) => gap.disposition === "NEEDS_REVIEW").length;
   const report: CoverageReport = {
@@ -341,7 +315,7 @@ function pageKeyFromRouteLike(value: string) {
     return "";
   }
   if (value.startsWith("/")) {
-    return value.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+    return normalizePageKey(value.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
   }
   return pageKeyFromPath(value);
 }
@@ -356,7 +330,16 @@ function pageKeyFromPath(filePath: string) {
     .replace(/\.(tsx|jsx|ts|js)$/, "")
     .replace(/\/index$/, "")
     .replace(/^\/+/, "");
-  return withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+  return normalizePageKey(withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
+}
+
+function normalizePageKey(value: string) {
+  return value
+    .replace(/\$\{[^}]+\}/g, "id")
+    .replace(/\[[^\]]+\]/g, "id")
+    .replace(/\s+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
 }
 
 function hash(value: string) {

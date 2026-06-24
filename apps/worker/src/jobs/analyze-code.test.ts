@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { analyzeCode } from "./analyze-code";
 
@@ -54,9 +54,15 @@ vi.mock("@code2wiki/github", () => ({
 describe("analyzeCode code map persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.CODE2WIKI_SCAN_KEYWORDS;
+  });
+
+  afterEach(() => {
+    delete process.env.CODE2WIKI_SCAN_KEYWORDS;
   });
 
   it("upserts one code_maps row for the generation run", async () => {
+    process.env.CODE2WIKI_SCAN_KEYWORDS = " payroll, Vessel ";
     const run = {
       id: "run-1",
       frontendRepositoryId: "repo-fe",
@@ -124,6 +130,16 @@ describe("analyzeCode code map persistence", () => {
 
     await expect(analyzeCode("run-1")).resolves.toMatchObject({ status: "facts_extracted", generationRunId: "run-1" });
 
+    expect(mocks.scanCode).toHaveBeenNthCalledWith(1, {
+      repositoryRole: "FRONTEND",
+      repositoryRoot: "/tmp/frontend",
+      keywordFilter: ["payroll", "Vessel"]
+    });
+    expect(mocks.scanCode).toHaveBeenNthCalledWith(2, {
+      repositoryRole: "BACKEND",
+      repositoryRoot: "/tmp/backend",
+      keywordFilter: ["payroll", "Vessel"]
+    });
     expect(codeMapInserts).toHaveLength(1);
     expect(codeMapInserts[0]).toMatchObject({
       id: "code_map_run-1",

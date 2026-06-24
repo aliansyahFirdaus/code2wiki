@@ -627,7 +627,7 @@ function pageKeyFromRouteLike(value: string) {
     return "";
   }
   if (value.startsWith("/")) {
-    return value.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+    return normalizePageKey(value.replace(/^\/+/, "").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
   }
   return pageKeyFromPath(value);
 }
@@ -642,7 +642,16 @@ function pageKeyFromPath(filePath: string) {
     .replace(/\.(tsx|jsx|ts|js)$/, "")
     .replace(/\/index$/, "")
     .replace(/^\/+/, "");
-  return withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase() || "frontend";
+  return normalizePageKey(withoutExtension.replace(/^api\//, "api/").split("/").filter(Boolean).slice(0, 4).join(".")) || "frontend";
+}
+
+function normalizePageKey(value: string) {
+  return value
+    .replace(/\$\{[^}]+\}/g, "id")
+    .replace(/\[[^\]]+\]/g, "id")
+    .replace(/\s+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
 }
 
 function sanitizeErrorMessage(error: unknown) {

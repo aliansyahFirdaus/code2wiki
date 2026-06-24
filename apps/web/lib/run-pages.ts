@@ -30,6 +30,22 @@ export async function pagesByGenerationRun(runIds: string[]) {
   return byRun;
 }
 
+export async function materializationCountsByGenerationRun(runIds: string[]) {
+  if (runIds.length === 0) {
+    return new Map<string, { written: number; reused: number }>();
+  }
+
+  const rows = await getDb().select().from(wikiRunPages).where(inArray(wikiRunPages.generationRunId, runIds));
+  const counts = new Map<string, { written: number; reused: number }>();
+  for (const row of rows) {
+    const existing = counts.get(row.generationRunId) ?? { written: 0, reused: 0 };
+    if (row.materializationType === "WRITTEN") existing.written += 1;
+    if (row.materializationType === "REUSED") existing.reused += 1;
+    counts.set(row.generationRunId, existing);
+  }
+  return counts;
+}
+
 function addPage(map: Map<string, Array<typeof wikiPages.$inferSelect>>, runId: string, page: typeof wikiPages.$inferSelect) {
   const existing = map.get(runId) ?? [];
   if (!existing.some((item) => item.pageKey === page.pageKey)) {

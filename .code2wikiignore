@@ -1,0 +1,41 @@
+# Dependency and build output
+node_modules/
+.next/
+dist/
+build/
+coverage/
+vendor/
+
+# Generated and cache folders
+generated/
+__generated__/
+.turbo/
+.cache/
+.swc/
+
+# Repo/agent instructions, docs, and local tool state
+AGENT.md
+AGENTS.md
+CLAUDE.md
+.agents/
+.claude/
+.codex/
+
+# Tests and stories are not product behavior pages
+__tests__/
+*.test.*
+*.spec.*
+*.stories.*
+*.story.*
+
+# Large static assets
+public/
+assets/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.svg
+*.pdf
+*.zip

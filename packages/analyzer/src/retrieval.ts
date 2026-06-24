@@ -161,7 +161,8 @@ function buildContext(input: {
   const pageFiles = new Set(pageNodes.map((node) => fileKey(node)));
   const pageApiCallNodes = input.nodes.filter((node) => node.kind === "FRONTEND_API_CALL" && pageFiles.has(fileKey(node)));
   const callEdges = input.edges.filter((edge) => edge.kind === "CALLS_API" && pageApiCallNodes.some((node) => node.stableKey === edge.fromStableKey));
-  const linkedNodeKeys = new Set([...pageNodes.map((node) => node.stableKey), ...callEdges.flatMap((edge) => [edge.fromStableKey, edge.toStableKey])]);
+  const semanticBackendNodes = input.nodes.filter((node) => node.repositoryRole === "BACKEND" && semanticMatch(input.pageKey, `${node.label} ${node.filePath}`));
+  const linkedNodeKeys = new Set([...pageNodes.map((node) => node.stableKey), ...callEdges.flatMap((edge) => [edge.fromStableKey, edge.toStableKey]), ...semanticBackendNodes.map((node) => node.stableKey)]);
   const linkedFiles = new Set(input.nodes.filter((node) => linkedNodeKeys.has(node.stableKey)).map((node) => fileKey(node)));
   const facts = takeWithWarning(
     input.facts.filter((fact) => factMatchesContext(fact, input.evidenceById, linkedFiles, input.pageKey)).sort((left, right) => rankFact(input.pageKey, left, input.evidenceById, linkedFiles) - rankFact(input.pageKey, right, input.evidenceById, linkedFiles) || compareFacts(left, right)),
@@ -347,9 +348,12 @@ function hasKeptEvidence(evidenceIds: string[], keptEvidenceIds: Set<string>) {
 }
 
 function factMatchesContext(fact: RetrievalFactInput, evidenceById: Map<string, RetrievalEvidenceInput>, linkedFiles: Set<string>, pageKey: string) {
+  if (fact.repositoryRole === "BACKEND" && semanticMatch(pageKey, fact.text)) {
+    return true;
+  }
   return fact.evidenceIds.some((id) => {
     const evidence = evidenceById.get(id);
-    return evidence ? linkedFiles.has(fileKey(evidence)) || pageKeyFromPath(evidence.filePath) === pageKey : false;
+    return evidence ? linkedFiles.has(fileKey(evidence)) || pageKeyFromPath(evidence.filePath) === pageKey || (evidence.repositoryRole === "BACKEND" && semanticMatch(pageKey, `${evidence.filePath} ${evidence.summary}`)) : false;
   });
 }
 
@@ -371,7 +375,7 @@ function pageKeysFromNodes(nodes: CodeMapNode[]) {
 
 function rankFact(pageKey: string, fact: RetrievalFactInput, evidenceById: Map<string, RetrievalEvidenceInput>, linkedFiles: Set<string>) {
   const evidence = fact.evidenceIds.map((id) => evidenceById.get(id)).filter(isDefined);
-  return Math.min(...evidence.map((item) => (pageKeyFromPath(item.filePath) === pageKey ? 0 : linkedFiles.has(fileKey(item)) ? 2 : 8))) - fact.confidence;
+  return Math.min(...evidence.map((item) => (pageKeyFromPath(item.filePath) === pageKey ? 0 : linkedFiles.has(fileKey(item)) ? 2 : item.repositoryRole === "BACKEND" && semanticMatch(pageKey, `${item.filePath} ${item.summary}`) ? 3 : 8))) - fact.confidence;
 }
 
 function rankNode(pageKey: string, node: CodeMapNode, linkedNodeKeys: Set<string>) {
@@ -428,7 +432,33 @@ function pageKeyFromPath(filePath: string) {
 }
 
 function normalizePage(value: string) {
-  return value.replace(/^\/+/, "").replace(/\//g, ".").replace(/\s+/g, ".").replace(/^\.+|\.+$/g, "").toLowerCase();
+  return value
+    .replace(/\$\{[^}]+\}/g, "id")
+    .replace(/\[[^\]]+\]/g, "id")
+    .replace(/^\/+/, "")
+    .replace(/\//g, ".")
+    .replace(/\s+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .toLowerCase();
+}
+
+function semanticMatch(pageKey: string, value: string) {
+  const tokens = pageTokens(pageKey);
+  if (tokens.length === 0) {
+    return false;
+  }
+  const normalized = value.toLowerCase();
+  return tokens.some((token) => normalized.includes(token));
+}
+
+function pageTokens(pageKey: string) {
+  const stopWords = new Set(["admin", "internal", "page", "detail", "create", "edit", "manage", "list", "id"]);
+  return pageKey
+    .replace(/\$\{[^}]+\}/g, " ")
+    .replace(/\[[^\]]+\]/g, " ")
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length >= 4 && !stopWords.has(token));
 }
 
 function hasLocalPath(value: string) {

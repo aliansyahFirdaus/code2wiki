@@ -10,7 +10,7 @@ describe("quality validator", () => {
     expect(report.gateResult).toBe("PASS");
   });
 
-  it("fails for missing evidence, wrong-generation evidence, invented page key, leaks, technical prose, empty page, and unsupported related page", () => {
+  it("fails for missing evidence, wrong-generation evidence, invented page key, leaks, empty page, and unsupported related page", () => {
     const report = validateQuality(
       input({
         allowedPageKeys: ["crew.add"],
@@ -71,6 +71,7 @@ describe("quality validator", () => {
               blocks: [
                 block({ stableKey: "a", text: "Some various stuff can happen etc.", evidenceIds: ["ev-1"] }),
                 block({ stableKey: "b", text: "Some various stuff can happen etc.", evidenceIds: ["ev-1"] }),
+                block({ stableKey: "technical", text: "The API endpoint calls a backend handler.", evidenceIds: ["ev-2"] }),
                 paragraph("Crew can save after validation."),
                 { ...block({ stableKey: "long", evidenceIds: ["ev-1"] }), text: "x".repeat(501), type: "statement" as const, confidence: 0.8, lastGeneratedRunId: "run-1" },
                 openQuestion(),

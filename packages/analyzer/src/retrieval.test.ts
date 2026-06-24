@@ -18,13 +18,23 @@ describe("buildRetrievalContexts", () => {
     expect(context.crossRepoLinks[0].kind).toBe("CALLS_API");
   });
 
-  it("excludes ambiguous backend endpoints without deterministic CALLS_API edges", () => {
-    const input = fixture({ includeCallEdge: false });
+  it("excludes unrelated backend endpoints without deterministic CALLS_API edges", () => {
+    const input = fixture({ includeCallEdge: false, backendName: "billing" });
     const result = buildRetrievalContexts({ ...input, pageKeys: ["users"] });
     const context = result.contexts[0];
 
     expect(context.crossRepoLinks).toHaveLength(0);
     expect(context.backend.facts).toHaveLength(0);
+  });
+
+  it("includes semantically matching backend context when frontend API edges are missing", () => {
+    const input = fixture({ includeCallEdge: false });
+    const result = buildRetrievalContexts({ ...input, pageKeys: ["users"] });
+    const context = result.contexts[0];
+
+    expect(context.crossRepoLinks).toHaveLength(0);
+    expect(context.backend.facts.map((fact) => fact.id)).toContain("be-route-fact");
+    expect(context.backend.evidence.map((item) => item.id)).toContain("be-route");
   });
 
   it("preserves frontend and backend roles from repositoryRole", () => {
@@ -119,28 +129,29 @@ describe("buildRetrievalContexts", () => {
   });
 });
 
-function fixture(options: { includeCallEdge?: boolean } = {}) {
+function fixture(options: { includeCallEdge?: boolean; backendName?: string } = {}) {
   const includeCallEdge = options.includeCallEdge ?? true;
+  const backendName = options.backendName ?? "users";
   const evidenceRows = [
     evidence("fe-route", "run-1", "FRONTEND", "app/users/page.tsx"),
     evidence("fe-call", "run-1", "FRONTEND", "app/users/page.tsx", "API_CALL"),
-    evidence("be-route", "run-1", "BACKEND", "app/api/users/route.ts"),
-    evidence("be-handler", "run-1", "BACKEND", "app/api/users/route.ts", "HANDLER"),
-    evidence("be-duplicate", "run-1", "BACKEND", "app/api/users-copy/route.ts")
+    evidence("be-route", "run-1", "BACKEND", `app/api/${backendName}/route.ts`),
+    evidence("be-handler", "run-1", "BACKEND", `app/api/${backendName}/route.ts`, "HANDLER"),
+    evidence("be-duplicate", "run-1", "BACKEND", `app/api/${backendName}-copy/route.ts`)
   ];
   const facts = [
     fact("fe-route-fact", "run-1", "FRONTEND", "ROUTE", "Frontend route /users", ["fe-route"], 0.95),
     fact("fe-call-fact", "run-1", "FRONTEND", "API_CALL", "fetch('/api/users', { method: 'POST' })", ["fe-call"], 0.95),
-    fact("be-route-fact", "run-1", "BACKEND", "API_ROUTE", "Backend API route /api/users", ["be-route"], 0.95),
+    fact("be-route-fact", "run-1", "BACKEND", "API_ROUTE", `Backend API route /api/${backendName}`, ["be-route"], 0.95),
     fact("be-handler-fact", "run-1", "BACKEND", "CONTROLLER_HANDLER", "POST handler", ["be-handler"], 0.9),
-    fact("be-dupe-fact", "run-1", "BACKEND", "API_ROUTE", "Backend API route /api/users", ["be-duplicate"], 0.95)
+    fact("be-dupe-fact", "run-1", "BACKEND", "API_ROUTE", `Backend API route /api/${backendName}`, ["be-duplicate"], 0.95)
   ];
   const nodes = [
     node("node-fe-route", "UI_ROUTE", "FRONTEND", "app/users/page.tsx", "/users", ["fe-route"], { path: "/users" }),
     node("node-fe-call", "FRONTEND_API_CALL", "FRONTEND", "app/users/page.tsx", "POST /api/users", ["fe-call"], { path: "/api/users", method: "POST" }),
-    node("node-be-route", "BACKEND_API_ROUTE", "BACKEND", "app/api/users/route.ts", "/api/users", ["be-route"], { path: "/api/users" }),
-    node("node-be-handler", "BACKEND_HANDLER", "BACKEND", "app/api/users/route.ts", "POST handler", ["be-handler"], { method: "POST" }),
-    node("node-be-duplicate", "BACKEND_API_ROUTE", "BACKEND", "app/api/users-copy/route.ts", "/api/users", ["be-duplicate"], { path: "/api/users" })
+    node("node-be-route", "BACKEND_API_ROUTE", "BACKEND", `app/api/${backendName}/route.ts`, `/api/${backendName}`, ["be-route"], { path: `/api/${backendName}` }),
+    node("node-be-handler", "BACKEND_HANDLER", "BACKEND", `app/api/${backendName}/route.ts`, "POST handler", ["be-handler"], { method: "POST" }),
+    node("node-be-duplicate", "BACKEND_API_ROUTE", "BACKEND", `app/api/${backendName}-copy/route.ts`, `/api/${backendName}`, ["be-duplicate"], { path: `/api/${backendName}` })
   ] satisfies CodeMapNode[];
   const edges = includeCallEdge ? [edge("edge-call", "CALLS_API", "node-fe-call", "node-be-route", ["fe-call", "be-route"])] : [];
   const codeMap = { generationRunId: "run-1", sourceHash: "map-source", nodes, edges } satisfies CodeMap;

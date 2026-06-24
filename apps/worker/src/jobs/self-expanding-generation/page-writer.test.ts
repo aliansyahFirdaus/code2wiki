@@ -126,6 +126,10 @@ describe("page writer", () => {
       qualityReportJson: expect.objectContaining({ gateResult: "PASS" }),
       aiUsageJson: expect.objectContaining({ summary: expect.objectContaining({ callCount: 1 }) })
     });
+    expect(mocks.createAIProvider.mock.results[0].value.generateProductWiki.mock.calls[0][0].pageGroups[0].evidence[0]).toMatchObject({
+      id: "ev-1",
+      codeSnippet: "name required"
+    });
     expect(db.debugEvents.map((event) => event.eventType)).toEqual(["AI_PAGE_WRITE_STARTED", "PAGE_WRITTEN"]);
   });
 

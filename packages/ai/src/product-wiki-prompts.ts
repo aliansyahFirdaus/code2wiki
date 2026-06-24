@@ -7,14 +7,21 @@ export type ProductWikiMessage = {
 
 const systemPrompt = [
   "Generate Code2Wiki ProductWikiBlock JSON from deterministic code evidence only.",
-  "Output JSON only. Do not output markdown, prose wrappers, or a markdown canonical document; no markdown is canonical.",
+  "Return ONLY one JSON object. Do not output markdown, prose wrappers, or a markdown canonical document; no markdown is canonical.",
+  "The top-level object MUST use exactly this shape: {\"pages\":[...]}",
+  "Never use top-level keys such as wikiBlocks, blocks, documents, data, result, or output.",
+  "Each page MUST contain pageKey, title, and blocks.",
+  "Each block MUST contain type. Use block.type, never blockType.",
+  "For sourced behavior, use type=\"statement\", text, and evidenceIds.",
+  "Use evidenceIds as an array of strings, never evidenceReferences.",
   "Do not browse, inspect files, ask for hidden context, or assume context that is not in the provided pageGroups.",
   "Use only provided pageGroups, facts, evidence, allowed pageKeys, and evidence IDs.",
   "Never invent evidence IDs. Every CODE statement must use valid provided evidenceIds.",
   "Unsupported behavior must be omitted, treated as NEEDS_REVIEW, or represented as open_question; prefer omit/open_question because reviewState is normalized locally.",
   "Do not expose local paths, secrets, tokens, env values, Authorization headers, provider metadata, or raw hidden context.",
   "Write user-facing product stories, not implementation explanations.",
-  "Do not use technical implementation terms such as API, endpoint, handler, SQL, database, frontend, backend, component, route, function, schema, or code identifiers unless that exact term is visibly user-facing in the product evidence."
+  "Do not use technical implementation terms such as API, endpoint, handler, SQL, database, frontend, backend, component, route, function, schema, or code identifiers unless that exact term is visibly user-facing in the product evidence.",
+  "Valid minimal example: {\"pages\":[{\"pageKey\":\"payroll.vessel-bonus\",\"title\":\"Payroll Vessel Bonus\",\"blocks\":[{\"type\":\"title\",\"text\":\"Payroll Vessel Bonus\"},{\"type\":\"statement\",\"text\":\"Users can review Vessel Bonus payroll values before recalculating payroll.\",\"evidenceIds\":[\"ev_manual_1\"],\"confidence\":0.9}]}]}"
 ].join("\n");
 
 const blockContract = {
@@ -42,7 +49,11 @@ const evidencePolicy = [
 const styleGuide = [
   "Write product knowledge, not implementation trivia.",
   "Audience: product, operations, support, QA, and implementation readers who need product behavior without implementation prose.",
-  "Be concise, factual, and non-marketing.",
+  "Write complete product docs, not terse bullet dumps.",
+  "Make the page read like a clear feature story: context, user goal, main flow, important variations, business rules, permissions, side effects, empty/error states, and operational impact.",
+  "Use natural section headings and combine related evidence into coherent statements when the evidence directly supports the same user-visible behavior.",
+  "Avoid generic repeated phrasing such as \"This page allows users to\"; explain what happens, when it happens, and why it matters.",
+  "Be factual, specific, and non-marketing.",
   "Explain user-visible flows, business rules, validations, permissions, side effects, error states, and dependencies.",
   "Avoid file names, route names, component names, function names, and code-map stable keys unless user-visible and evidence-backed.",
   "Prefer what happens and under what condition over where code lives.",
