@@ -45,6 +45,10 @@ Local MVP demo path for the real GitHub App -> tag pair -> worker -> wiki reader
    ```
 7. Open a completed wiki page, select sourced blocks, and save manual `EDIT` overlays.
 
+## Architecture Notes
+
+- [Self-expanding generation architecture](docs/self-expanding-generation-architecture.md): planned migration from one large generation pass to task-queued, incremental wiki updates.
+
 ## Checks
 
 ```sh

@@ -2,7 +2,7 @@ import { sanitizeErrorText, sanitizeJson } from "@code2wiki/shared";
 
 import { analyzeCode } from "./jobs/analyze-code";
 import { cloneRepository } from "./jobs/clone-repository";
-import { generateWiki } from "./jobs/generate-wiki";
+import { runSelfExpandingGeneration } from "./jobs/self-expanding-generation/task-queue";
 
 export type WorkerCommand = "all" | "clone" | "analyze" | "generate";
 
@@ -47,7 +47,7 @@ export async function runWorkerCli(args = process.argv.slice(2)) {
     return { command: parsed.command, result: await analyzeCode(parsed.generationRunId) };
   }
   if (parsed.command === "generate") {
-    return { command: parsed.command, result: await generateWiki(parsed.generationRunId) };
+    return { command: parsed.command, result: await runSelfExpandingGeneration(parsed.generationRunId) };
   }
 
   return {
@@ -56,7 +56,7 @@ export async function runWorkerCli(args = process.argv.slice(2)) {
     results: [
       await cloneRepository(parsed.generationRunId),
       await analyzeCode(parsed.generationRunId),
-      await generateWiki(parsed.generationRunId)
+      await runSelfExpandingGeneration(parsed.generationRunId)
     ]
   };
 }

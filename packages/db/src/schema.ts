@@ -7,6 +7,7 @@ import {
   real,
   text,
   timestamp,
+  index,
   uniqueIndex
 } from "drizzle-orm/pg-core";
 
@@ -36,6 +37,28 @@ export const generationRunStatusEnum = pgEnum("generation_run_status", [
 export const blockOriginEnum = pgEnum("block_origin", ["CODE", "MANUAL", "CODE_EDITED"]);
 export const reviewStateEnum = pgEnum("review_state", ["VERIFIED", "NEEDS_REVIEW", "OPEN_QUESTION"]);
 export const overlayTypeEnum = pgEnum("overlay_type", ["EDIT", "HIDE", "ADD_AFTER", "ADD_CHILD"]);
+export const generationTaskTypeEnum = pgEnum("generation_task_type", [
+  "DISCOVER_SURFACE",
+  "TRACE_BEHAVIOR",
+  "CREATE_PAGE",
+  "UPDATE_PAGE",
+  "EVALUATE_COVERAGE"
+]);
+export const generationTaskStatusEnum = pgEnum("generation_task_status", [
+  "QUEUED",
+  "IN_PROGRESS",
+  "SUCCEEDED",
+  "READY_TO_WRITE",
+  "WRITTEN",
+  "NO_WIKI_VALUE",
+  "NEEDS_REVIEW",
+  "FAILED"
+]);
+export const generationTaskBranchStateEnum = pgEnum("generation_task_branch_state", [
+  "FOUND_CHILDREN",
+  "WAITING_RELATED_BRANCH",
+  "NEEDS_FRONTEND_ANCHOR"
+]);
 
 export const workspaces = pgTable("workspaces", {
   id: text("id").primaryKey(),
@@ -196,6 +219,41 @@ export const codeSummaries = pgTable(
       table.summaryType,
       table.cacheKey
     )
+  })
+);
+
+export const generationTasks = pgTable(
+  "generation_tasks",
+  {
+    id: text("id").primaryKey(),
+    generationRunId: text("generation_run_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    repositoryRole: repositoryRoleEnum("repository_role"),
+    repositoryId: text("repository_id"),
+    taskType: generationTaskTypeEnum("task_type").notNull(),
+    status: generationTaskStatusEnum("status").notNull().default("QUEUED"),
+    branchState: generationTaskBranchStateEnum("branch_state"),
+    priority: integer("priority").notNull().default(100),
+    pageKey: text("page_key"),
+    parentTaskId: text("parent_task_id"),
+    rootTaskId: text("root_task_id"),
+    dedupeKey: text("dedupe_key").notNull(),
+    reason: text("reason").notNull(),
+    payloadJson: jsonb("payload_json").$type<Record<string, unknown>>().notNull(),
+    resultJson: jsonb("result_json").$type<Record<string, unknown> | null>(),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    errorMessage: text("error_message"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    generationRunDedupeUnique: uniqueIndex("generation_tasks_run_dedupe_unique").on(table.generationRunId, table.dedupeKey),
+    generationRunStatusCreatedAtIdx: index("generation_tasks_run_status_created_idx").on(table.generationRunId, table.status, table.createdAt),
+    generationRunPageKeyIdx: index("generation_tasks_run_page_key_idx").on(table.generationRunId, table.pageKey)
   })
 );
 

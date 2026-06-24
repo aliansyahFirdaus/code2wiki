@@ -1,8 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { parseWorkerCliArgs } from "./index";
+import { parseWorkerCliArgs, runWorkerCli } from "./index";
+
+const mocks = vi.hoisted(() => ({
+  analyzeCode: vi.fn(),
+  cloneRepository: vi.fn(),
+  runSelfExpandingGeneration: vi.fn()
+}));
+
+vi.mock("./jobs/analyze-code", () => ({ analyzeCode: mocks.analyzeCode }));
+vi.mock("./jobs/clone-repository", () => ({ cloneRepository: mocks.cloneRepository }));
+vi.mock("./jobs/self-expanding-generation/task-queue", () => ({ runSelfExpandingGeneration: mocks.runSelfExpandingGeneration }));
 
 describe("parseWorkerCliArgs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("defaults to all steps", () => {
     expect(parseWorkerCliArgs([])).toEqual({ ok: true, command: "all" });
   });
@@ -30,5 +44,15 @@ describe("parseWorkerCliArgs", () => {
       ok: false,
       error: "Usage: pnpm worker:run -- [generationRunId]"
     });
+  });
+
+  it("dispatches generate to the self-expanding task queue", async () => {
+    mocks.runSelfExpandingGeneration.mockResolvedValue({ status: "tasks_processed", generationRunId: "run_123" });
+
+    await expect(runWorkerCli(["generate", "run_123"])).resolves.toEqual({
+      command: "generate",
+      result: { status: "tasks_processed", generationRunId: "run_123" }
+    });
+    expect(mocks.runSelfExpandingGeneration).toHaveBeenCalledWith("run_123");
   });
 });
