@@ -69,8 +69,11 @@ describe("quality validator", () => {
               pageKey: "crew.add",
               title: "Add Crew",
               blocks: [
+                heading("Ringkasan"),
                 block({ stableKey: "a", text: "Some various stuff can happen etc.", evidenceIds: ["ev-1"] }),
+                heading("Konsep Penting"),
                 block({ stableKey: "b", text: "Some various stuff can happen etc.", evidenceIds: ["ev-1"] }),
+                heading("Alur Kerja Utama"),
                 block({ stableKey: "technical", text: "The API endpoint calls a backend handler.", evidenceIds: ["ev-2"] }),
                 paragraph("Crew can save after validation."),
                 { ...block({ stableKey: "long", evidenceIds: ["ev-1"] }), text: "x".repeat(501), type: "statement" as const, confidence: 0.8, lastGeneratedRunId: "run-1" },
@@ -107,6 +110,81 @@ describe("quality validator", () => {
     );
 
     expect(report.gateResult).toBe("PASS");
+  });
+
+  it("passes a full internal-module section page", () => {
+    const report = validateQuality(
+      input({
+        evidence: [
+          { id: "ev-1", generationRunId: "run-1", repositoryRole: "FRONTEND" },
+          { id: "ev-2", generationRunId: "run-1", repositoryRole: "BACKEND" },
+          { id: "ev-3", generationRunId: "run-1", repositoryRole: "BACKEND" }
+        ],
+        output: {
+          pages: [
+            {
+              pageKey: "crew.add",
+              title: "Add Crew",
+              blocks: [
+                heading("Ringkasan"),
+                block({ stableKey: "fe", text: "Crew can be added from the form.", evidenceIds: ["ev-1"] }),
+                heading("Siapa Yang Menggunakan Modul Ini"),
+                block({ stableKey: "be", text: "Crew creation is saved after submission.", evidenceIds: ["ev-2"] }),
+                heading("Alur Kerja Utama"),
+                block({ stableKey: "rule", text: "Crew records become available after the saved submission.", evidenceIds: ["ev-3"] })
+              ]
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.gateResult).toBe("PASS");
+    expect(metric(report, "internalModuleSectionCount")).toBe(3);
+  });
+
+  it("fails a thin page when substantial evidence exists", () => {
+    const report = validateQuality(
+      input({
+        evidence: [
+          { id: "ev-1", generationRunId: "run-1", repositoryRole: "FRONTEND" },
+          { id: "ev-2", generationRunId: "run-1", repositoryRole: "BACKEND" },
+          { id: "ev-3", generationRunId: "run-1", repositoryRole: "BACKEND" }
+        ],
+        output: {
+          pages: [
+            {
+              pageKey: "crew.add",
+              title: "Add Crew",
+              blocks: [block({ stableKey: "only", text: "Crew can be added from the form.", evidenceIds: ["ev-1"] })]
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.gateResult).toBe("FAIL");
+    expect(codes(report)).toEqual(expect.arrayContaining(["INTERNAL_MODULE_THIN_PAGE", "MISSING_INTERNAL_MODULE_STRUCTURE"]));
+  });
+
+  it("does not fail weak evidence just because it uses open questions", () => {
+    const report = validateQuality(
+      input({
+        evidence: [{ id: "ev-1", generationRunId: "run-1", repositoryRole: "FRONTEND" }],
+        output: {
+          pages: [
+            {
+              pageKey: "crew.add",
+              title: "Add Crew",
+              blocks: [openQuestion()]
+            }
+          ]
+        }
+      })
+    );
+
+    expect(report.gateResult).toBe("WARN");
+    expect(codes(report)).not.toContain("INTERNAL_MODULE_THIN_PAGE");
   });
 });
 
@@ -156,6 +234,10 @@ function paragraph(text: string) {
   return { ...block({ stableKey: "paragraph", evidenceIds: [] }), type: "paragraph" as const, text };
 }
 
+function heading(text: string) {
+  return { ...block({ stableKey: text, evidenceIds: [] }), type: "heading" as const, text, level: 2 as const };
+}
+
 function relatedPage(pageId: string) {
   return { ...block({ stableKey: "related", evidenceIds: [] }), type: "related_page" as const, pageId, title: "Unknown" };
 }
@@ -166,4 +248,8 @@ function openQuestion() {
 
 function codes(report: ReturnType<typeof validateQuality>) {
   return report.issues.map((issue) => issue.code);
+}
+
+function metric(report: ReturnType<typeof validateQuality>, name: string) {
+  return report.metrics.find((item) => item.name === name)?.value;
 }

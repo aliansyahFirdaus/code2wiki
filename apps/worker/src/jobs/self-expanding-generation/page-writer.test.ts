@@ -171,6 +171,63 @@ describe("page writer", () => {
     expect(result).toMatchObject({ ok: true, pageKey: "users" });
     expect(db.pageEvidence).toMatchObject([{ factId: expect.stringMatching(/^synthetic_/) }]);
   });
+
+  it("repairs thin internal-module output before persisting", async () => {
+    const db = new FakeDb({
+      runs: [run()],
+      facts: [fact({ evidenceIds: ["ev-1", "ev-2", "ev-3"] })],
+      evidence: [
+        evidenceRow({ id: "ev-1", summary: "User creation requires a name." }),
+        evidenceRow({ id: "ev-2", summary: "Saved users become available to the team." }),
+        evidenceRow({ id: "ev-3", summary: "Users can be reviewed after creation." })
+      ]
+    });
+    const provider = {
+      generateProductWiki: vi.fn()
+        .mockResolvedValueOnce({
+          output: {
+            pages: [
+              {
+                pageKey: "users",
+                title: "Users",
+                blocks: [{ type: "statement", text: "Users can be created after the required name is provided.", evidenceIds: ["ev-1"], confidence: 0.9 }]
+              }
+            ]
+          },
+          usage: usage()
+        })
+        .mockResolvedValueOnce({
+          output: {
+            pages: [
+              {
+                pageKey: "users",
+                title: "Users",
+                blocks: [
+                  { type: "heading", text: "Ringkasan", level: 2 },
+                  { type: "statement", text: "Users can be created after the required name is provided.", evidenceIds: ["ev-1"], confidence: 0.9 },
+                  { type: "heading", text: "Siapa Yang Menggunakan Modul Ini", level: 2 },
+                  { type: "statement", text: "Saved users become available to the team.", evidenceIds: ["ev-2"], confidence: 0.9 },
+                  { type: "heading", text: "Alur Kerja Utama", level: 2 },
+                  { type: "statement", text: "Users can be reviewed after creation.", evidenceIds: ["ev-3"], confidence: 0.9 }
+                ]
+              }
+            ]
+          },
+          usage: usage()
+        })
+    };
+    mocks.getDb.mockReturnValue(db);
+    mocks.createAIProvider.mockReturnValue(provider);
+
+    const result = await writePageTask(run(), task("CREATE_PAGE", { payloadJson: { evidenceIds: ["ev-1", "ev-2", "ev-3"] } }));
+
+    expect(result).toMatchObject({ ok: true, generatedStatementCount: 3, generatedStatementWithEvidenceCount: 3 });
+    expect(provider.generateProductWiki).toHaveBeenCalledTimes(2);
+    expect(provider.generateProductWiki.mock.calls[1][1].validationErrors).toEqual(expect.arrayContaining([expect.stringContaining("INTERNAL_MODULE_THIN_PAGE")]));
+    expect(db.blocks).toHaveLength(6);
+    expect(db.runs[0].aiUsageJson).toMatchObject({ summary: { callCount: 2 } });
+    expect(db.debugEvents.map((event) => event.eventType)).toEqual(["AI_PAGE_WRITE_STARTED", "AI_PAGE_WRITE_REPAIR_STARTED", "PAGE_WRITTEN"]);
+  });
 });
 
 function run() {
@@ -203,7 +260,7 @@ function run() {
   };
 }
 
-function task(taskType: "CREATE_PAGE" | "UPDATE_PAGE") {
+function task(taskType: "CREATE_PAGE" | "UPDATE_PAGE", overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: "task-1",
     generationRunId: "run-1",
@@ -228,11 +285,12 @@ function task(taskType: "CREATE_PAGE" | "UPDATE_PAGE") {
     startedAt: null,
     finishedAt: null,
     createdAt: new Date("2026-01-01T00:00:00Z"),
-    updatedAt: new Date("2026-01-01T00:00:00Z")
+    updatedAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides
   };
 }
 
-function fact() {
+function fact(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: "fact-1",
     generationRunId: "run-1",
@@ -243,11 +301,12 @@ function fact() {
     factKind: "FORM",
     text: "Users can be created after name validation.",
     evidenceIds: ["ev-1"],
-    confidence: 0.95
+    confidence: 0.95,
+    ...overrides
   };
 }
 
-function evidenceRow() {
+function evidenceRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: "ev-1",
     generationRunId: "run-1",
@@ -261,7 +320,21 @@ function evidenceRow() {
     sourceKind: "FORM",
     summary: "User creation requires a name.",
     codeSnippet: "name required",
-    githubUrl: "https://github.com/acme/web/blob/sha/app/users/page.tsx#L1-L4"
+    githubUrl: "https://github.com/acme/web/blob/sha/app/users/page.tsx#L1-L4",
+    ...overrides
+  };
+}
+
+function usage() {
+  return {
+    provider: "openrouter",
+    model: "test-model",
+    promptTokenEstimate: 10,
+    promptTokens: 10,
+    completionTokens: 5,
+    totalTokens: 15,
+    inputCharCount: 100,
+    outputCharCount: 100
   };
 }
 

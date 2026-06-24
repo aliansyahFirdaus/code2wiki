@@ -1,4 +1,5 @@
 import type { ProductWikiBlock, ProductWikiOutput } from "@code2wiki/document";
+import { internalModuleTemplateSections } from "./internal-module-template";
 
 export type QualitySeverity = "ERROR" | "WARN";
 export type QualityGateResult = "PASS" | "WARN" | "FAIL";
@@ -55,6 +56,7 @@ export function validateQuality(input: ValidateQualityInput): QualityReport {
   let needsReviewCount = 0;
   let frontendCited = false;
   let backendCited = false;
+  let internalModuleSectionCount = 0;
   const statementTexts = new Map<string, string>();
 
   for (const page of input.output.pages) {
@@ -69,6 +71,7 @@ export function validateQuality(input: ValidateQualityInput): QualityReport {
       blockCount += 1;
       if (block.reviewState === "NEEDS_REVIEW") needsReviewCount += 1;
       if (block.type === "open_question") openQuestionCount += 1;
+      if (block.type === "heading" && isInternalModuleSection(block.text)) internalModuleSectionCount += 1;
 
       for (const leak of leakIssues(blockText(block), page.pageKey, block.stableKey)) {
         issues.push(leak);
@@ -123,6 +126,16 @@ export function validateQuality(input: ValidateQualityInput): QualityReport {
     issues.push(warn("ONE_ROLE_CITED_WITH_FE_BE_CONTEXT", "Frontend and backend context exist, but output cites only one role."));
   }
   if (statementCount < 2) issues.push(warn("LOW_STATEMENT_COUNT", "Low statement count."));
+  const substantialEvidence = input.evidence.length >= 3;
+  if (substantialEvidence && (statementCount < 2 || blockCount < 5)) {
+    issues.push(error("INTERNAL_MODULE_THIN_PAGE", "Substantial evidence produced a thin internal module page."));
+  }
+  if (substantialEvidence && internalModuleSectionCount < 3) {
+    issues.push(error("MISSING_INTERNAL_MODULE_STRUCTURE", "Substantial evidence produced too few internal module sections."));
+  }
+  if (!substantialEvidence && input.evidence.length > 0 && internalModuleSectionCount === 0 && statementCount === 0) {
+    issues.push(warn("MISSING_INTERNAL_MODULE_STRUCTURE", "Internal module structure is incomplete for weak evidence."));
+  }
   if (blockCount > 0 && openQuestionCount / blockCount > 0.4) issues.push(warn("HIGH_OPEN_QUESTION_RATIO", "High open_question ratio."));
   if (blockCount > 0 && needsReviewCount / blockCount > 0.4) issues.push(warn("HIGH_NEEDS_REVIEW_RATIO", "High NEEDS_REVIEW ratio."));
   if (input.evidence.length > 0 && usedEvidenceCount / input.evidence.length < 0.25) issues.push(warn("LOW_EVIDENCE_USAGE", "Low evidence usage."));
@@ -131,11 +144,22 @@ export function validateQuality(input: ValidateQualityInput): QualityReport {
   metrics.set("blockCount", blockCount);
   metrics.set("statementCount", statementCount);
   metrics.set("usedEvidenceCount", usedEvidenceCount);
+  metrics.set("internalModuleSectionCount", internalModuleSectionCount);
+  metrics.set("templateCoverageRatio", internalModuleTemplateSections.length ? internalModuleSectionCount / internalModuleTemplateSections.length : 0);
   metrics.set("openQuestionRatio", blockCount ? openQuestionCount / blockCount : 0);
   metrics.set("needsReviewRatio", blockCount ? needsReviewCount / blockCount : 0);
   metrics.set("evidenceUsageRatio", input.evidence.length ? usedEvidenceCount / input.evidence.length : 0);
 
   return report(issues, [...metrics.entries()].map(([name, value]) => ({ name, value })));
+}
+
+function isInternalModuleSection(text: string) {
+  const normalized = normalizeHeading(text);
+  return internalModuleTemplateSections.some((section) => normalizeHeading(section) === normalized);
+}
+
+function normalizeHeading(text: string) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function report(issues: QualityIssue[], metrics: QualityMetric[]): QualityReport {

@@ -63,6 +63,16 @@ describe("product wiki prompts", () => {
     expect(text).not.toContain("API contracts");
   });
 
+  it("includes the internal module template", () => {
+    const text = messageText(buildProductWikiMessages(input()));
+
+    expect(text).toContain("internal module template");
+    expect(text).toContain("Ringkasan");
+    expect(text).toContain("Siapa Yang Menggunakan Modul Ini");
+    expect(text).toContain("Alur Kerja Utama");
+    expect(text).toContain("Yang Perlu Dicek Jika Ada Masalah");
+  });
+
   it("repair prompt forbids new claims", () => {
     const text = messageText(buildProductWikiRepairMessages(input(), { pages: [] }, ["missing evidence"]));
 
@@ -70,6 +80,7 @@ describe("product wiki prompts", () => {
     expect(text).toContain("JSON Repair");
     expect(text).toContain("Do not introduce new claims");
     expect(text).toContain("Repair JSON only");
+    expect(text).toContain("Restore missing internal module structure");
   });
 
   it("forbids and redacts local paths, secrets, tokens, env values, and provider metadata", () => {

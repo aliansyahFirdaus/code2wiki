@@ -1,4 +1,5 @@
 import type { GenerateProductWikiInput } from "./provider";
+import { internalModuleTemplateSections } from "./internal-module-template";
 
 export type ProductWikiMessage = {
   role: "system" | "user";
@@ -50,6 +51,8 @@ const styleGuide = [
   "Write product knowledge, not implementation trivia.",
   "Audience: product, operations, support, QA, and implementation readers who need product behavior without implementation prose.",
   "Write complete product docs, not terse bullet dumps.",
+  "Use the internal module template when evidence supports it: Ringkasan, Siapa Yang Menggunakan Modul Ini, Kapan Modul Ini Digunakan, Konsep Penting, Data Yang Dikelola, Alur Kerja Utama, Hubungan Dengan Modul Lain, Aturan Bisnis, Contoh Penggunaan, Hal Yang Sering Membingungkan, Yang Perlu Dicek Jika Ada Masalah, Catatan Internal.",
+  "Ringkasan may be a 2-4 paragraph story, but every behavior claim must stay evidence-backed.",
   "Make the page read like a clear feature story: context, user goal, main flow, important variations, business rules, permissions, side effects, empty/error states, and operational impact.",
   "Use natural section headings and combine related evidence into coherent statements when the evidence directly supports the same user-visible behavior.",
   "Avoid generic repeated phrasing such as \"This page allows users to\"; explain what happens, when it happens, and why it matters.",
@@ -101,6 +104,7 @@ const repairPolicy = [
   "Remove invalid or invented evidenceIds.",
   "Remove unsupported statements.",
   "Convert unsupported behavior to open_question only if provided evidence supports uncertainty.",
+  "Restore missing internal module structure when validation errors mention thin or missing template sections, without adding unsupported claims.",
   "Keep pageKeys allowed.",
   "Keep schema-compatible JSON."
 ] as const;
@@ -113,6 +117,7 @@ export function buildProductWikiMessages(input: GenerateProductWikiInput): Produ
     blockContract,
     evidencePolicy,
     styleGuide,
+    internalModuleTemplateSections,
     stagedInstructions,
     pageGroups: input.pageGroups
   });
@@ -130,6 +135,7 @@ export function buildProductWikiRepairMessages(
     blockContract,
     evidencePolicy,
     styleGuide,
+    internalModuleTemplateSections,
     stagedInstructions: [
       ...stagedInstructions,
       {
