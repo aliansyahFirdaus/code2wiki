@@ -31,10 +31,13 @@ export const generationRunStatusEnum = pgEnum("generation_run_status", [
   "AI_GENERATING",
   "VALIDATING",
   "COMPLETED",
+  "CANCELED",
   "NEEDS_REVIEW",
   "FAILED",
   "AI_OUTPUT_INVALID"
 ]);
+export const generationRunExecutionModeEnum = pgEnum("generation_run_execution_mode", ["AUTO", "MANUAL"]);
+export const generationRunControlStateEnum = pgEnum("generation_run_control_state", ["ACTIVE", "PAUSED", "CANCEL_REQUESTED"]);
 export const blockOriginEnum = pgEnum("block_origin", ["CODE", "MANUAL", "CODE_EDITED"]);
 export const reviewStateEnum = pgEnum("review_state", ["VERIFIED", "NEEDS_REVIEW", "OPEN_QUESTION"]);
 export const overlayTypeEnum = pgEnum("overlay_type", ["EDIT", "HIDE", "ADD_AFTER", "ADD_CHILD"]);
@@ -54,6 +57,7 @@ export const generationTaskStatusEnum = pgEnum("generation_task_status", [
   "WRITTEN",
   "NO_WIKI_VALUE",
   "NEEDS_REVIEW",
+  "CANCELED",
   "FAILED"
 ]);
 export const generationTaskBranchStateEnum = pgEnum("generation_task_branch_state", [
@@ -153,6 +157,9 @@ export const generationRuns = pgTable(
     backendTag: text("backend_tag").notNull(),
     backendCommitSha: text("backend_commit_sha").notNull(),
     status: generationRunStatusEnum("status").notNull().default("QUEUED"),
+    executionMode: generationRunExecutionModeEnum("execution_mode").notNull().default("AUTO"),
+    controlState: generationRunControlStateEnum("control_state").notNull().default("ACTIVE"),
+    advanceRequestedAt: timestamp("advance_requested_at", { withTimezone: true }),
     totalEligibleFiles: integer("total_eligible_files").notNull().default(0),
     indexedEligibleFiles: integer("indexed_eligible_files").notNull().default(0),
     frontendTotalEligibleFiles: integer("frontend_total_eligible_files").notNull().default(0),

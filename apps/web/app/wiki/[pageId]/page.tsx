@@ -20,6 +20,7 @@ export default async function WikiPage({ params }: Props) {
   return (
     <WikiReaderShell
       currentPageId={pageId}
+      workspaceId={data.page.workspaceId}
       pages={data.pages}
       blocks={data.blocks}
       generationRun={data.generationRun}

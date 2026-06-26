@@ -23,12 +23,13 @@ type WikiPageItem = {
 
 type Props = {
   currentPageId: string;
+  workspaceId: string;
   pages: WikiPageItem[];
   blocks: ProductWikiBlock[];
   generationRun: GenerationRunSummary | null;
 };
 
-export function WikiReaderShell({ currentPageId, pages, blocks, generationRun }: Props) {
+export function WikiReaderShell({ currentPageId, workspaceId, pages, blocks, generationRun }: Props) {
   const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [localText, setLocalText] = useState<Record<string, string>>({});
@@ -116,6 +117,7 @@ export function WikiReaderShell({ currentPageId, pages, blocks, generationRun }:
         page={currentPage}
         generationRun={generationRun}
         blocks={blocks}
+        workspaceId={workspaceId}
         selectedBlockId={selectedBlockId}
         onSelectBlock={selectBlock}
         editing={editing}

@@ -2,21 +2,37 @@ import { sanitizeErrorText, sanitizeJson } from "@code2wiki/shared";
 
 import { analyzeCode } from "./jobs/analyze-code";
 import { cloneRepository } from "./jobs/clone-repository";
+import { deleteGenerationRun } from "./jobs/delete-generation-run";
 import { runSelfExpandingGeneration } from "./jobs/self-expanding-generation/task-queue";
+import { runWorkerDaemon } from "./daemon";
 
-export type WorkerCommand = "all" | "clone" | "analyze" | "generate";
+export type WorkerCommand = "all" | "clone" | "analyze" | "generate" | "delete-generation" | "daemon";
 
 export type WorkerCliArgs =
-  | { ok: true; command: WorkerCommand; generationRunId?: string }
+  | { ok: true; command: WorkerCommand; generationRunId?: string; pollIntervalMs?: number }
   | { ok: false; error: string };
 
 export function parseWorkerCliArgs(args: string[]): WorkerCliArgs {
   const normalizedArgs = args[0] === "--" ? args.slice(1) : args;
   const [first, second, ...rest] = normalizedArgs;
-  const commands = new Set<WorkerCommand>(["clone", "analyze", "generate"]);
+  const commands = new Set<WorkerCommand>(["clone", "analyze", "generate", "delete-generation", "daemon"]);
+
+  if (first === "daemon") {
+    if (rest.length > 0) {
+      return { ok: false, error: "Usage: pnpm worker:run -- daemon [pollIntervalMs]" };
+    }
+    if (!second) {
+      return { ok: true, command: "daemon" };
+    }
+    const pollIntervalMs = Number(second);
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0) {
+      return { ok: false, error: "Usage: pnpm worker:run -- daemon [pollIntervalMs]" };
+    }
+    return { ok: true, command: "daemon", pollIntervalMs };
+  }
 
   if (rest.length > 0) {
-    return { ok: false, error: "Usage: pnpm worker:run -- [clone|analyze|generate] [generationRunId]" };
+    return { ok: false, error: "Usage: pnpm worker:run -- [clone|analyze|generate|delete-generation] [generationRunId]" };
   }
 
   if (!first) {
@@ -48,6 +64,13 @@ export async function runWorkerCli(args = process.argv.slice(2)) {
   }
   if (parsed.command === "generate") {
     return { command: parsed.command, result: await runSelfExpandingGeneration(parsed.generationRunId) };
+  }
+  if (parsed.command === "delete-generation") {
+    return { command: parsed.command, result: await deleteGenerationRun(parsed.generationRunId) };
+  }
+  if (parsed.command === "daemon") {
+    await runWorkerDaemon({ pollIntervalMs: parsed.pollIntervalMs });
+    return { command: parsed.command, status: "running" as const };
   }
 
   return {

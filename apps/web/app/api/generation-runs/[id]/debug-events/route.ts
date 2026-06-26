@@ -17,8 +17,10 @@ export async function GET(request: Request, context: Context) {
     const result = await loadGenerationDebugEvents({
       generationRunId: id,
       afterId: searchParams.get("afterId"),
+      beforeId: searchParams.get("beforeId"),
       since: searchParams.get("since"),
-      limit: Number(searchParams.get("limit")) || null
+      limit: Number(searchParams.get("limit")) || null,
+      tail: searchParams.get("tail") === "1"
     });
     if (!result) {
       return NextResponse.json({ error: { code: "GENERATION_RUN_NOT_FOUND", message: "Generation run not found." } }, { status: 404 });

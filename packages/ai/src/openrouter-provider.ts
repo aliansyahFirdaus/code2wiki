@@ -11,6 +11,9 @@ import {
 import { buildProductWikiMessages, buildProductWikiRepairMessages } from "./product-wiki-prompts";
 
 export const OPENROUTER_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const requestStartTimes: number[] = [];
+let rateLimitMutex = Promise.resolve();
 
 const productWikiJsonSchema = {
   type: "object",
@@ -64,9 +67,10 @@ export class OpenRouterProvider implements AIProvider {
   readonly capabilities: AIProviderCapabilities;
 
   constructor(private readonly config?: AIProviderConfig) {
+    const provider = config?.provider ?? "openrouter";
     this.capabilities = {
-      provider: "openrouter",
-      model: config?.model ?? process.env.OPENROUTER_MODEL ?? process.env.AI_MODEL ?? OPENROUTER_DEFAULT_MODEL,
+      provider,
+      model: config?.model ?? OPENROUTER_DEFAULT_MODEL,
       supportsStrictJsonSchema: true,
       supportsUsage: true,
       supportsRepair: true,
@@ -75,13 +79,22 @@ export class OpenRouterProvider implements AIProvider {
     };
   }
 
-  async generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<GenerateProductWikiResult> {
-    const apiKey = this.config?.apiKey ?? process.env.OPENROUTER_API_KEY;
-    const model = this.config?.model ?? process.env.OPENROUTER_MODEL ?? process.env.AI_MODEL ?? OPENROUTER_DEFAULT_MODEL;
-    const baseUrl = this.config?.baseUrl ?? process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
+  async generateProductWiki(
+    input: GenerateProductWikiInput,
+    repair?: GenerateProductWikiRepairInput,
+    options?: { signal?: AbortSignal }
+  ): Promise<GenerateProductWikiResult> {
+    const provider = this.config?.provider ?? "openrouter";
+    const apiKey = this.config?.apiKey;
+    const model = this.config?.model ?? OPENROUTER_DEFAULT_MODEL;
+    const baseUrl = this.config?.baseUrl;
+    const maxRequestsPerMinute = this.config?.maxRequestsPerMinute ?? null;
 
     if (!apiKey) {
-      throw new Error("OPENROUTER_API_KEY is required.");
+      throw new Error("AI_API_KEY is required.");
+    }
+    if (!baseUrl) {
+      throw new Error("AI_BASE_URL is required.");
     }
 
     const messages = repair
@@ -89,8 +102,11 @@ export class OpenRouterProvider implements AIProvider {
       : buildProductWikiMessages(input);
     const inputCharCount = messages.reduce((total, message) => total + message.content.length, 0);
 
+    await waitForRateLimit(maxRequestsPerMinute);
+
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
+      signal: options?.signal,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json"
@@ -98,9 +114,13 @@ export class OpenRouterProvider implements AIProvider {
       body: JSON.stringify({
         model,
         temperature: 0,
-        provider: {
-          require_parameters: true
-        },
+        ...(provider === "openrouter"
+          ? {
+              provider: {
+                require_parameters: true
+              }
+            }
+          : {}),
         response_format: {
           type: "json_schema",
           json_schema: {
@@ -131,9 +151,44 @@ export class OpenRouterProvider implements AIProvider {
 
     return {
       output: parseJsonOrString(content),
-      usage: sanitizedUsage({ body, model, inputCharCount, outputCharCount: content.length })
+      usage: sanitizedUsage({ body, provider, model, inputCharCount, outputCharCount: content.length })
     };
   }
+}
+
+async function waitForRateLimit(maxRequestsPerMinute: number | null) {
+  if (!maxRequestsPerMinute || maxRequestsPerMinute < 1) {
+    return;
+  }
+
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = rateLimitMutex;
+  rateLimitMutex = previous.then(() => next);
+  await previous;
+
+  try {
+    for (;;) {
+      const now = Date.now();
+      while (requestStartTimes.length > 0 && now - requestStartTimes[0] >= RATE_LIMIT_WINDOW_MS) {
+        requestStartTimes.shift();
+      }
+      if (requestStartTimes.length < maxRequestsPerMinute) {
+        requestStartTimes.push(now);
+        return;
+      }
+      const waitMs = RATE_LIMIT_WINDOW_MS - (now - requestStartTimes[0]);
+      await sleep(waitMs);
+    }
+  } finally {
+    release();
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 function parseJson(value: string) {
@@ -153,16 +208,19 @@ function parseJsonOrString(value: string) {
 }
 
 function isStructuredOutputUnsupported(status: number, body: string) {
+  if (/Unsupported parameter\(s\):\s*`provider`/i.test(body)) {
+    return false;
+  }
   return (
     status === 400 &&
     /response_format|json_schema|structured|require_parameters|unsupported|not support|parameters/i.test(body)
   );
 }
 
-function sanitizedUsage(input: { body: unknown; model: string; inputCharCount: number; outputCharCount: number }): ProviderUsage {
+function sanitizedUsage(input: { body: unknown; provider: "openrouter" | "nvidia"; model: string; inputCharCount: number; outputCharCount: number }): ProviderUsage {
   const usage = isRecord(input.body) && isRecord(input.body.usage) ? input.body.usage : {};
   return {
-    provider: "openrouter",
+    provider: input.provider,
     model: input.model,
     promptTokenEstimate: Math.ceil(input.inputCharCount / 4),
     promptTokens: numberOrNull(usage.prompt_tokens),
@@ -179,4 +237,9 @@ function numberOrNull(value: unknown) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+export function resetOpenRouterRateLimitForTests() {
+  requestStartTimes.length = 0;
+  rateLimitMutex = Promise.resolve();
 }

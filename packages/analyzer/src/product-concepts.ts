@@ -4,11 +4,35 @@ export type ProductConceptSource =
   | "UI_TEXT"
   | "FIELD_NAME"
   | "ACTION"
+  | "STATE"
+  | "VALIDATION"
   | "API_PATH"
   | "SCHEMA"
   | "AUTH"
   | "ERROR"
   | "CODE_MAP_EDGE";
+
+export type ProductConceptRole =
+  | "route"
+  | "workspace"
+  | "tab"
+  | "modal"
+  | "async"
+  | "mutation"
+  | "validation"
+  | "permission"
+  | "error"
+  | "empty_state"
+  | "action"
+  | "field";
+
+export type ProductConceptProfile = {
+  roles: ProductConceptRole[];
+  score: number;
+  parentPageKey?: string;
+  lineageReason?: string;
+  technicalOnly: boolean;
+};
 
 export type ProductConcept = {
   conceptKey: string;
@@ -18,6 +42,7 @@ export type ProductConcept = {
   evidenceIds: string[];
   sourceNodeKeys: string[];
   reasons: string[];
+  profile: ProductConceptProfile;
 };
 
 export type DeriveProductConceptsInput = {
@@ -49,7 +74,7 @@ const genericWords = new Set([
 export function deriveProductConcepts(input: DeriveProductConceptsInput): ProductConcept[] {
   const evidenceById = new Map(input.evidence.map((item) => [item.id, item]));
   const concepts = new Map<string, ProductConcept>();
-  const add = (draft: Omit<ProductConcept, "conceptKey" | "label"> & { value: string; label?: string }) => {
+  const add = (draft: Omit<ProductConcept, "conceptKey" | "label" | "profile"> & { value: string; label?: string; profile?: Partial<ProductConceptProfile> }) => {
     const concept = productConceptFromDraft(draft);
     if (!concept) return;
     const existing = concepts.get(concept.conceptKey);
@@ -66,7 +91,8 @@ export function deriveProductConcepts(input: DeriveProductConceptsInput): Produc
         confidence: node.confidence,
         evidenceIds: node.evidenceIds,
         sourceNodeKeys: [node.stableKey],
-        reasons: [`form field ${fieldName}`]
+        reasons: [`form field ${fieldName}`],
+        profile: nodeProfile(node, ["field"])
       });
     }
 
@@ -78,18 +104,20 @@ export function deriveProductConcepts(input: DeriveProductConceptsInput): Produc
         confidence: node.confidence,
         evidenceIds: node.evidenceIds,
         sourceNodeKeys: [node.stableKey],
-        reasons: [`api path ${path}`]
+        reasons: [`api path ${path}`],
+        profile: nodeProfile(node, apiRoles(node))
       });
     }
 
-    if (node.kind === "SCHEMA_ENTITY" || node.kind === "AUTH_CHECK" || node.kind === "ERROR_STATE") {
+    if (node.kind === "VALIDATION" || node.kind === "SCHEMA_ENTITY" || node.kind === "AUTH_CHECK" || node.kind === "ERROR_STATE") {
       add({
         value: conceptFromText(node.label),
-        source: node.kind === "SCHEMA_ENTITY" ? "SCHEMA" : node.kind === "AUTH_CHECK" ? "AUTH" : "ERROR",
+        source: node.kind === "VALIDATION" ? "VALIDATION" : node.kind === "SCHEMA_ENTITY" ? "SCHEMA" : node.kind === "AUTH_CHECK" ? "AUTH" : "ERROR",
         confidence: downgradeTechnicalConfidence(node.confidence),
         evidenceIds: node.evidenceIds,
         sourceNodeKeys: [node.stableKey],
-        reasons: [`${node.kind.toLowerCase()} ${node.label}`]
+        reasons: [`${node.kind.toLowerCase()} ${node.label}`],
+        profile: nodeProfile(node, node.kind === "VALIDATION" ? ["validation"] : node.kind === "AUTH_CHECK" ? ["permission"] : node.kind === "ERROR_STATE" ? stateRoles(node.label) : [])
       });
     }
   }
@@ -102,7 +130,8 @@ export function deriveProductConcepts(input: DeriveProductConceptsInput): Produc
         confidence: confidenceFromScore(fact.confidence),
         evidenceIds: fact.evidenceIds,
         sourceNodeKeys: [],
-        reasons: [`button action ${fact.text}`]
+        reasons: [`button action ${fact.text}`],
+        profile: factProfile(fact, ["action", ...textRoles(fact.text)])
       });
     }
     if (fact.factKind === "API_CALL") {
@@ -114,9 +143,21 @@ export function deriveProductConcepts(input: DeriveProductConceptsInput): Produc
           confidence: confidenceFromScore(fact.confidence),
           evidenceIds: fact.evidenceIds,
           sourceNodeKeys: [],
-          reasons: [`api path ${path}`]
+          reasons: [`api path ${path}`],
+          profile: factProfile(fact, apiRoles({ metadata: { path }, label: fact.text }))
         });
       }
+    }
+    if (fact.factKind === "VALIDATION_HINT" || fact.factKind === "VALIDATION_RULE" || fact.factKind === "PERMISSION_HINT" || fact.factKind === "PERMISSION_CHECK" || fact.factKind === "UI_STATE") {
+      add({
+        value: conceptFromText(fact.text),
+        source: fact.factKind.includes("VALIDATION") ? "VALIDATION" : fact.factKind.includes("PERMISSION") ? "AUTH" : "STATE",
+        confidence: confidenceFromScore(fact.confidence),
+        evidenceIds: fact.evidenceIds,
+        sourceNodeKeys: [],
+        reasons: [`${fact.factKind.toLowerCase()} ${fact.text}`],
+        profile: factProfile(fact, fact.factKind.includes("VALIDATION") ? ["validation", ...textRoles(fact.text)] : fact.factKind.includes("PERMISSION") ? ["permission"] : stateRoles(fact.text))
+      });
     }
   }
 
@@ -128,7 +169,8 @@ export function deriveProductConcepts(input: DeriveProductConceptsInput): Produc
         confidence: "HIGH",
         evidenceIds: [item.id],
         sourceNodeKeys: [],
-        reasons: [`ui text ${label}`]
+        reasons: [`ui text ${label}`],
+        profile: evidenceProfile(item, textRoles(label))
       });
     }
   }
@@ -146,17 +188,19 @@ export function deriveProductConcepts(input: DeriveProductConceptsInput): Produc
       confidence: edge.confidence,
       evidenceIds: edge.evidenceIds,
       sourceNodeKeys: [edge.fromStableKey, edge.toStableKey],
-      reasons: [`${edge.kind} to ${target.label}`]
+      reasons: [`${edge.kind} to ${target.label}`],
+      profile: nodeProfile(target, edgeRoles(edge.kind, target))
     });
   }
 
   return [...concepts.values()].sort((left, right) => left.conceptKey.localeCompare(right.conceptKey));
 }
 
-function productConceptFromDraft(input: Omit<ProductConcept, "conceptKey" | "label"> & { value: string; label?: string }): ProductConcept | null {
+function productConceptFromDraft(input: Omit<ProductConcept, "conceptKey" | "label" | "profile"> & { value: string; label?: string; profile?: Partial<ProductConceptProfile> }): ProductConcept | null {
   const tokens = conceptTokens(input.value);
   if (tokens.length === 0) return null;
   const conceptKey = tokens.join("-");
+  const roles = uniqueSorted(input.profile?.roles ?? []) as ProductConceptRole[];
   return {
     conceptKey,
     label: input.label ?? humanize(conceptKey),
@@ -164,14 +208,22 @@ function productConceptFromDraft(input: Omit<ProductConcept, "conceptKey" | "lab
     confidence: input.confidence,
     evidenceIds: uniqueSorted(input.evidenceIds),
     sourceNodeKeys: uniqueSorted(input.sourceNodeKeys),
-    reasons: uniqueSorted(input.reasons)
+    reasons: uniqueSorted(input.reasons),
+    profile: {
+      roles,
+      score: scoreRoles(roles, conceptKey),
+      parentPageKey: input.profile?.parentPageKey,
+      lineageReason: input.profile?.lineageReason,
+      technicalOnly: input.profile?.technicalOnly ?? isTechnicalOnly(input.source, roles)
+    }
   };
 }
 
 function conceptTokens(value: string) {
   const rawTokens = splitWords(value).map((token) => singularize(token.toLowerCase()));
   const hasSalary = rawTokens.includes("salary");
-  return rawTokens.filter((token) => token.length >= 3 && (!genericWords.has(token) || (token === "component" && hasSalary)));
+  const hasMerge = rawTokens.includes("merge");
+  return rawTokens.filter((token) => token.length >= 3 && (!genericWords.has(token) || (token === "component" && hasSalary) || (token === "data" && hasMerge)));
 }
 
 function splitWords(value: string) {
@@ -184,6 +236,7 @@ function splitWords(value: string) {
 }
 
 function singularize(value: string) {
+  if (value.endsWith("ies") && value.length > 4) return `${value.slice(0, -3)}y`;
   return value.endsWith("s") && value.length > 4 ? value.slice(0, -1) : value;
 }
 
@@ -203,7 +256,9 @@ function conceptFromApiPath(path: string) {
 }
 
 function conceptFromText(value: string) {
-  return value.replace(/\b(?:database entity|data definition|permission check|error response|controller handler|backend route|frontend route)\b/gi, " ");
+  return value
+    .replace(/\b(?:database entity|data definition|permission check|permission hint|validation rule|validation hint|ui state|error response|controller handler|backend route|frontend route)\b/gi, " ")
+    .replace(/\b(?:requires?|must|should|when|if|before|after)\b.*$/i, " ");
 }
 
 function actionText(value: string) {
@@ -236,6 +291,115 @@ function stringMetadata(node: CodeMapNode, key: string) {
   return typeof value === "string" ? value : undefined;
 }
 
+function nodeProfile(node: CodeMapNode, roles: ProductConceptRole[]): Partial<ProductConceptProfile> {
+  return {
+    roles: uniqueSorted([...roles, ...textRoles(`${node.label} ${node.filePath}`)]) as ProductConceptRole[],
+    parentPageKey: pageKeyFromPath(node.filePath),
+    lineageReason: `from ${node.kind.toLowerCase()} evidence`
+  };
+}
+
+function factProfile(fact: CodeMapFactInput, roles: ProductConceptRole[]): Partial<ProductConceptProfile> {
+  return {
+    roles: uniqueSorted(roles) as ProductConceptRole[],
+    technicalOnly: fact.repositoryRole === "BACKEND" && roles.every((role) => role === "validation" || role === "permission")
+  };
+}
+
+function evidenceProfile(item: CodeMapEvidenceInput, roles: ProductConceptRole[]): Partial<ProductConceptProfile> {
+  return {
+    roles: uniqueSorted([...roles, ...sourceKindRoles(item.sourceKind), ...textRoles(`${item.summary} ${item.codeSnippet}`)]) as ProductConceptRole[],
+    parentPageKey: pageKeyFromPath(item.filePath),
+    lineageReason: `from ${item.sourceKind.toLowerCase()} evidence`
+  };
+}
+
+function apiRoles(input: { metadata: Record<string, unknown>; label: string }): ProductConceptRole[] {
+  const method = String(input.metadata.method ?? "").toUpperCase();
+  const path = String(input.metadata.path ?? input.label);
+  return uniqueSorted([
+    "async",
+    ...(method && method !== "GET" ? (["mutation"] as const) : []),
+    ...textRoles(path)
+  ]) as ProductConceptRole[];
+}
+
+function edgeRoles(edgeKind: string, target: CodeMapNode): ProductConceptRole[] {
+  if (edgeKind === "FORM_HAS_FIELD") return ["field"];
+  if (edgeKind === "FIELD_HAS_VALIDATION" || edgeKind === "HANDLER_USES_SCHEMA") return ["validation"];
+  if (edgeKind === "HANDLER_USES_AUTH") return ["permission"];
+  if (edgeKind === "HAS_ERROR_STATE") return stateRoles(target.label);
+  if (edgeKind === "CALLS_API") return apiRoles(target);
+  return textRoles(target.label);
+}
+
+function sourceKindRoles(sourceKind: string): ProductConceptRole[] {
+  if (sourceKind === "ACTION") return ["action"];
+  if (sourceKind === "VALIDATION") return ["validation"];
+  if (sourceKind === "PERMISSION") return ["permission"];
+  if (sourceKind === "ERROR") return ["error"];
+  return [];
+}
+
+function stateRoles(value: string): ProductConceptRole[] {
+  const text = value.toLowerCase();
+  return uniqueSorted([
+    ...(text.match(/\b(?:empty|none|blank|no\b.*\bresults?)\b/) ? (["empty_state"] as const) : []),
+    ...(text.match(/\b(?:error|failed|invalid|warning)\b/) ? (["error"] as const) : []),
+    ...textRoles(text)
+  ]) as ProductConceptRole[];
+}
+
+function textRoles(value: string): ProductConceptRole[] {
+  const text = value.toLowerCase();
+  const roles: ProductConceptRole[] = [];
+  if (/\b(?:workspace|tenant|organization)\b/.test(text)) roles.push("workspace");
+  if (/\btab\b/.test(text)) roles.push("tab");
+  if (/\b(?:modal|dialog|drawer)\b/.test(text)) roles.push("modal");
+  if (/\b(?:loading|async|recalculate|refresh|sync|import|export|submit|save|delete|create|update|merge)\b/.test(text)) roles.push("async");
+  if (/\b(?:recalculate|submit|save|delete|create|update|merge|import|approve|reject|assign)\b/.test(text)) roles.push("mutation");
+  if (/\b(?:required|validate|validation|invalid|must|minimum|maximum)\b/.test(text)) roles.push("validation");
+  if (/\b(?:permission|role|auth|access|allowed|admin)\b/.test(text)) roles.push("permission");
+  if (/\b(?:error|failed|failure|warning)\b/.test(text)) roles.push("error");
+  if (/\b(?:empty|no\b.*\bresults?|blank)\b/.test(text)) roles.push("empty_state");
+  if (/\b(?:button|click|action|filter|search|sort)\b/.test(text)) roles.push("action");
+  if (/\b(?:field|input|select|filter)\b/.test(text)) roles.push("field");
+  return uniqueSorted(roles) as ProductConceptRole[];
+}
+
+function scoreRoles(roles: ProductConceptRole[], conceptKey: string) {
+  const roleSet = new Set(roles);
+  let score = 0;
+  for (const role of roleSet) {
+    if (role === "route" || role === "workspace" || role === "tab" || role === "modal") score += 2;
+    else if (role === "async" || role === "mutation" || role === "validation" || role === "permission") score += 1;
+    else if (role === "action" || role === "error" || role === "empty_state" || role === "field") score += 1;
+  }
+  if (roleSet.has("action") && roleSet.has("async") && roleSet.has("mutation")) score += 1;
+  if (rootConceptTokens.some((token) => conceptKey.startsWith(`${token}-`) || conceptKey === token) && score >= 2) score += 2;
+  return score;
+}
+
+function isTechnicalOnly(source: ProductConceptSource, roles: ProductConceptRole[]) {
+  return source === "SCHEMA" || (source === "API_PATH" && roles.length <= 2) || (source === "CODE_MAP_EDGE" && roles.length === 0);
+}
+
+const rootConceptTokens = ["payroll", "insurance", "vessel", "crew", "contract"];
+
+function pageKeyFromPath(filePath: string) {
+  return filePath
+    .replace(/^src\//, "")
+    .replace(/^app\//, "")
+    .replace(/^pages\//, "")
+    .replace(/\/page\.(tsx|jsx|ts|js)$/, "")
+    .replace(/\.(tsx|jsx|ts|js)$/, "")
+    .split("/")
+    .filter((part) => part && !part.startsWith("["))
+    .slice(0, 3)
+    .join(".")
+    .toLowerCase();
+}
+
 function confidenceFromScore(score: number): CodeMapConfidence {
   if (score >= 0.9) return "HIGH";
   if (score >= 0.75) return "MEDIUM";
@@ -248,12 +412,20 @@ function downgradeTechnicalConfidence(confidence: CodeMapConfidence): CodeMapCon
 }
 
 function mergeConcept(left: ProductConcept, right: ProductConcept): ProductConcept {
+  const roles = uniqueSorted([...left.profile.roles, ...right.profile.roles]) as ProductConceptRole[];
   return {
     ...left,
     confidence: strongerConfidence(left.confidence, right.confidence),
     evidenceIds: uniqueSorted([...left.evidenceIds, ...right.evidenceIds]),
     sourceNodeKeys: uniqueSorted([...left.sourceNodeKeys, ...right.sourceNodeKeys]),
-    reasons: uniqueSorted([...left.reasons, ...right.reasons])
+    reasons: uniqueSorted([...left.reasons, ...right.reasons]),
+    profile: {
+      roles,
+      score: Math.max(left.profile.score, right.profile.score, scoreRoles(roles, left.conceptKey)),
+      parentPageKey: left.profile.parentPageKey ?? right.profile.parentPageKey,
+      lineageReason: left.profile.lineageReason ?? right.profile.lineageReason,
+      technicalOnly: left.profile.technicalOnly && right.profile.technicalOnly
+    }
   };
 }
 

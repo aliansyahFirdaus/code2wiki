@@ -32,6 +32,16 @@ describe("scanCode", () => {
 
     expect(result.totalEligibleFiles).toBe(1);
     expect(result.indexedEligibleFiles).toBe(1);
+    expect(result.eligibleFiles).toEqual(["app/users/page.tsx"]);
+    expect(result.indexedFiles).toEqual(["app/users/page.tsx"]);
+    expect(result.ignoredFiles).toEqual(expect.arrayContaining([
+      { filePath: ".next/", reason: "ignored directory" },
+      { filePath: "AGENTS.md", reason: ".code2wikiignore" },
+      { filePath: "package-lock.json", reason: "ignored filename" },
+      { filePath: "src/binary.ts", reason: "binary content" },
+      { filePath: "src/generated-file.ts", reason: "generated header" },
+      { filePath: "types.d.ts", reason: "ignored filename" }
+    ]));
     expect(result.evidence.every((item) => item.filePath === "app/users/page.tsx")).toBe(true);
   });
 
@@ -136,17 +146,28 @@ describe("scanCode", () => {
     expect(backend.facts).toEqual(expect.arrayContaining([expect.objectContaining({ factKind: "ERROR_RESPONSE" })]));
   });
 
-  it("filters scan scope by keyword across path and content", async () => {
+  it("limits scan scope by include paths and max indexed files", async () => {
     const root = await makeTempRoot();
-    await write(root, "internal/payroll/handler.go", "func RecalculatePayroll() { db.Where(\"status = ?\", \"queued\").Find(&runs) }");
-    await write(root, "internal/billing/handler.go", "func CreateInvoice() { db.Where(\"status = ?\", \"queued\").Find(&runs) }");
-    await write(root, "internal/services/compensation.go", "func SyncCompensation() { RecalculatePayroll() }");
+    await write(root, "src/app/payroll/page.tsx", "export default function PayrollPage() {\nreturn <button>Run Payroll</button>;\n}");
+    await write(root, "src/app/payroll/detail/page.tsx", "export default function PayrollDetailPage() {\nreturn <button>Recalculate</button>;\n}");
+    await write(root, "src/app/users/page.tsx", "export default function UsersPage() {\nreturn <button>Save</button>;\n}");
 
-    const backend = await scanCode({ repositoryRole: "BACKEND", repositoryRoot: root, keywordFilter: ["payroll"] });
+    const frontend = await scanCode({
+      repositoryRole: "FRONTEND",
+      repositoryRoot: root,
+      includePaths: ["src/app/payroll"],
+      maxFiles: 1
+    });
 
-    expect(backend.totalEligibleFiles).toBe(2);
-    expect(backend.indexedEligibleFiles).toBe(2);
-    expect(new Set(backend.evidence.map((item) => item.filePath))).toEqual(new Set(["internal/payroll/handler.go", "internal/services/compensation.go"]));
+    expect(frontend.totalEligibleFiles).toBe(2);
+    expect(frontend.indexedEligibleFiles).toBe(1);
+    expect(frontend.eligibleFiles).toEqual(["src/app/payroll/detail/page.tsx", "src/app/payroll/page.tsx"]);
+    expect(frontend.indexedFiles).toEqual(["src/app/payroll/detail/page.tsx"]);
+    expect(frontend.ignoredFiles).toEqual(expect.arrayContaining([
+      { filePath: "src/app/payroll/page.tsx", reason: "max files cap" },
+      { filePath: "src/app/users/page.tsx", reason: "outside scan roots" }
+    ]));
+    expect(new Set(frontend.evidence.map((item) => item.filePath))).toEqual(new Set(["src/app/payroll/detail/page.tsx"]));
   });
 
   it("anchors tab components to their parent route", async () => {
@@ -157,7 +178,7 @@ describe("scanCode", () => {
       "export function InsuranceTab() {\nreturn <TableHead>Insurance</TableHead>;\n}\n"
     );
 
-    const frontend = await scanCode({ repositoryRole: "FRONTEND", repositoryRoot: root, keywordFilter: ["insurance"] });
+    const frontend = await scanCode({ repositoryRole: "FRONTEND", repositoryRoot: root, includePaths: ["src/app/payroll"] });
 
     expect(frontend.facts).toEqual(
       expect.arrayContaining([

@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { OpenRouterProvider } from "./openrouter-provider";
+import { OpenRouterProvider, resetOpenRouterRateLimitForTests } from "./openrouter-provider";
 import type { GenerateProductWikiInput } from "./provider";
 import { buildProductWikiMessages, buildProductWikiRepairMessages } from "./product-wiki-prompts";
 
 describe("product wiki prompts", () => {
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    resetOpenRouterRateLimitForTests();
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
   it("includes evidence policy and valid-ID wording", () => {
@@ -61,6 +63,17 @@ describe("product wiki prompts", () => {
     expect(text).toContain("Do not use technical implementation terms");
     expect(text).toContain("Prefer flows, business rules, validations, permissions, side effects, error states, and dependencies over code trivia");
     expect(text).not.toContain("API contracts");
+  });
+
+  it("instructs attached concepts and bilingual page groups", () => {
+    const text = messageText(buildProductWikiMessages(input({ languages: ["id", "en"], attachedConcept: { conceptKey: "status-filter" } })));
+
+    expect(text).toContain("attachedConcept");
+    expect(text).toContain("place that evidence inside the relevant section");
+    expect(text).toContain("languages exactly [\"id\",\"en\"]");
+    expect(text).toContain("ID:");
+    expect(text).toContain("EN:");
+    expect(text).toContain("\"languages\":[\"id\",\"en\"]");
   });
 
   it("includes the internal module template", () => {
@@ -120,6 +133,16 @@ describe("product wiki prompts", () => {
     expect(body.temperature).toBe(0);
   });
 
+  it("NVIDIA requests omit OpenRouter-only provider parameters", async () => {
+    const fetchMock = mockFetch();
+
+    await provider({ provider: "nvidia" }).generateProductWiki(input());
+    const body = requestBody(fetchMock);
+
+    expect(body.provider).toBeUndefined();
+    expect(body.response_format?.type).toBe("json_schema");
+  });
+
   it("OpenRouterProvider sends one generation call and one optional repair call per invocation", async () => {
     const fetchMock = mockFetch();
     const openRouterProvider = provider();
@@ -175,19 +198,36 @@ describe("product wiki prompts", () => {
     expect(init?.headers).toMatchObject({ Authorization: "Bearer config-key" });
     expect(requestBody(fetchMock).model).toBe("config-model");
   });
+
+  it("OpenRouterProvider can throttle requests per minute", async () => {
+    vi.useFakeTimers();
+    const fetchMock = mockFetch();
+    const openRouterProvider = provider({ maxRequestsPerMinute: 1 });
+
+    await openRouterProvider.generateProductWiki(input());
+    const secondCall = openRouterProvider.generateProductWiki(input());
+
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await secondCall;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 function messageText(messages: ReturnType<typeof buildProductWikiMessages>) {
   return messages.map((message) => message.content).join("\n");
 }
 
-function input(): GenerateProductWikiInput {
+function input(pageGroupOverrides: Partial<GenerateProductWikiInput["pageGroups"][number]> = {}): GenerateProductWikiInput {
   return {
     generationRunId: "run-1",
     pageGroups: [
       {
         pageKey: "crew.add",
         title: "Add Crew",
+        ...pageGroupOverrides,
         facts: [
           {
             id: "fact-1",
@@ -246,10 +286,14 @@ function inputWithUnsafeStrings(): GenerateProductWikiInput {
   };
 }
 
-function provider() {
-  vi.stubEnv("OPENROUTER_API_KEY", "test-key");
-  vi.stubEnv("OPENROUTER_MODEL", "test-model");
-  return new OpenRouterProvider();
+function provider(overrides: Partial<ConstructorParameters<typeof OpenRouterProvider>[0]> = {}) {
+  return new OpenRouterProvider({
+    provider: "openrouter",
+    apiKey: "test-key",
+    model: "test-model",
+    baseUrl: "https://openrouter.example/api/v1",
+    ...overrides
+  });
 }
 
 function mockFetch() {

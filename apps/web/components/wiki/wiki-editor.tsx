@@ -23,6 +23,7 @@ type Props = {
   page: WikiPageItem | null;
   generationRun: GenerationRunSummary | null;
   blocks: ProductWikiBlock[];
+  workspaceId: string;
   selectedBlockId: string | null;
   onSelectBlock: (block: ProductWikiBlock) => void;
   editing: boolean;
@@ -40,6 +41,7 @@ export function WikiEditor({
   page,
   generationRun,
   blocks,
+  workspaceId,
   selectedBlockId,
   onSelectBlock,
   editing,
@@ -89,6 +91,9 @@ export function WikiEditor({
           </div>
           {editing ? (
             <div className={styles.toolbarActions}>
+              <a className={`${styles.button} ${styles.buttonSecondary}`} href={`/workspace?workspaceId=${encodeURIComponent(workspaceId)}`}>
+                Workspace
+              </a>
               <button type="button" onClick={onCancelEditing} disabled={saving} className={`${styles.button} ${styles.buttonSecondary}`}>
                 Cancel
               </button>
@@ -97,7 +102,12 @@ export function WikiEditor({
               </button>
             </div>
           ) : (
-            <EnableEditingButton onClick={onEnableEditing} />
+            <div className={styles.toolbarActions}>
+              <a className={`${styles.button} ${styles.buttonSecondary}`} href={`/workspace?workspaceId=${encodeURIComponent(workspaceId)}`}>
+                Workspace
+              </a>
+              <EnableEditingButton onClick={onEnableEditing} />
+            </div>
           )}
         </div>
         {saveError ? <p className={styles.errorBand}>{saveError}</p> : null}

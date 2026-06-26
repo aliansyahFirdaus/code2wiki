@@ -11,6 +11,7 @@ export type CloneRepositoryAtCommitInput = {
   repo: string;
   commitSha: string;
   token: string;
+  signal?: AbortSignal;
 };
 
 export type RepositoryCheckout = {
@@ -53,15 +54,15 @@ export async function cloneRepositoryAtCommit(input: CloneRepositoryAtCommitInpu
       GIT_TERMINAL_PROMPT: "0"
     };
 
-    await runGit(["clone", "--no-checkout", remoteUrl, repoPath], tempRoot, gitEnv);
+    await runGit(["clone", "--no-checkout", remoteUrl, repoPath], tempRoot, gitEnv, input.signal);
 
-    const storedRemoteUrl = (await runGit(["config", "--get", "remote.origin.url"], repoPath, gitEnv)).trim();
+    const storedRemoteUrl = (await runGit(["config", "--get", "remote.origin.url"], repoPath, gitEnv, input.signal)).trim();
     if (remoteUrlHasCredentials(storedRemoteUrl)) {
       throw new Error("Git remote URL contains credentials after clone.");
     }
 
-    await runGit(["checkout", "--detach", input.commitSha], repoPath, gitEnv);
-    const head = (await runGit(["rev-parse", "HEAD"], repoPath, gitEnv)).trim();
+    await runGit(["checkout", "--detach", input.commitSha], repoPath, gitEnv, input.signal);
+    const head = (await runGit(["rev-parse", "HEAD"], repoPath, gitEnv, input.signal)).trim();
     if (head.toLowerCase() !== input.commitSha.toLowerCase()) {
       throw new Error("Checked out HEAD does not match the expected commit SHA.");
     }
@@ -82,11 +83,12 @@ export async function cloneRepositoryAtCommit(input: CloneRepositoryAtCommitInpu
   }
 }
 
-async function runGit(args: string[], cwd: string, env: NodeJS.ProcessEnv) {
+async function runGit(args: string[], cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal) {
   try {
     const { stdout } = await execFileAsync("git", args, {
       cwd,
       env,
+      signal,
       maxBuffer: 10 * 1024 * 1024
     });
 

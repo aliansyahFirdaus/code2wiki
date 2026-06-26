@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     frontendRepositoryId: "generation_runs.frontend_repository_id",
     backendRepositoryId: "generation_runs.backend_repository_id",
     status: "generation_runs.status",
+    controlState: "generation_runs.control_state",
     createdAt: "generation_runs.created_at"
   },
   generationDebugEvents: { id: "generation_debug_events.id" },
@@ -155,6 +156,55 @@ describe("self-expanding generation task queue", () => {
     expect(db.tasks[0]).toMatchObject({ status: "FAILED", errorMessage: "STALE_TASK_RETRY_EXHAUSTED" });
   });
 
+  it("requeues retryable page-writer failures without failing the run", async () => {
+    mocks.writePageTask.mockResolvedValue({
+      ok: false,
+      status: "FAILED",
+      errorMessage: "OpenRouter request failed with status 524.",
+      retryable: true,
+      qualityReport: { gateResult: "PASS", issues: [], metrics: [] },
+      aiUsageReport: { calls: [], summary: { callCount: 1, promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCostUsdMicros: null, pricingSource: null } }
+    });
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      tasks: [task({ taskType: "CREATE_PAGE", dedupeKey: "create-page:users" })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    const result = await runSelfExpandingGeneration("run-1");
+
+    expect(result).toMatchObject({ status: "tasks_processed", queued: 1, failed: 0 });
+    expect(db.tasks[0]).toMatchObject({
+      status: "QUEUED",
+      errorMessage: "OpenRouter request failed with status 524.",
+      resultJson: { reason: "FAILED", retryable: true, aiCallCount: 1, attemptsRemaining: 2 }
+    });
+    expect(db.runs[0].status).toBe("AI_GENERATING");
+    expect(db.debugEvents.some((event) => event.eventType === "TASK_REQUEUED")).toBe(true);
+  });
+
+  it("fails the run after a retryable page-writer failure exhausts retry budget", async () => {
+    mocks.writePageTask.mockResolvedValue({
+      ok: false,
+      status: "FAILED",
+      errorMessage: "OpenRouter request failed with status 524.",
+      retryable: true,
+      qualityReport: { gateResult: "PASS", issues: [], metrics: [] },
+      aiUsageReport: { calls: [], summary: { callCount: 1, promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCostUsdMicros: null, pricingSource: null } }
+    });
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      tasks: [task({ taskType: "CREATE_PAGE", dedupeKey: "create-page:users", attempts: 2, maxAttempts: 3 })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    const result = await runSelfExpandingGeneration("run-1");
+
+    expect(result).toMatchObject({ status: "tasks_processed", failed: 1 });
+    expect(db.tasks[0]).toMatchObject({ status: "FAILED", errorMessage: "OpenRouter request failed with status 524." });
+    expect(db.runs[0].status).toBe("FAILED");
+  });
+
   it("dedupes repeated seed calls by dedupeKey", async () => {
     const db = new FakeDb({ runs: [run("FACTS_EXTRACTED")], codeMaps: [codeMap([uiRoute("/users", "app/users/page.tsx")])] });
     mocks.getDb.mockReturnValue(db);
@@ -201,7 +251,10 @@ describe("self-expanding generation task queue", () => {
   });
 
   it("DISCOVER_RELATED_CONCEPTS queues CREATE_PAGE and UPDATE_PAGE decisions", async () => {
-    mocks.deriveProductConcepts.mockReturnValue([{ conceptKey: "salary-component", evidenceIds: ["evidence-1"] }]);
+    mocks.deriveProductConcepts.mockReturnValue([
+      { conceptKey: "salary-component", evidenceIds: ["evidence-1"], profile: { parentPageKey: "payroll.monthly" } },
+      { conceptKey: "forgot-password-token", evidenceIds: ["evidence-2"], profile: { parentPageKey: "auth.forgot-password" } }
+    ]);
     mocks.matchConceptsToPages.mockReturnValue([
       conceptDecision({ disposition: "CREATE_PAGE", pageKey: "payroll.salary-component", conceptKey: "salary-component" }),
       conceptDecision({ disposition: "UPDATE_PAGE", pageKey: "vessel", conceptKey: "vessel", reason: "existing page matched concept" })
@@ -219,10 +272,56 @@ describe("self-expanding generation task queue", () => {
     await runSelfExpandingGeneration("run-1");
 
     expect(mocks.deriveProductConcepts).toHaveBeenCalledWith(expect.objectContaining({ facts: db.facts, evidence: db.evidence }));
-    expect(mocks.matchConceptsToPages).toHaveBeenCalledWith(expect.objectContaining({ existingPageKeys: ["vessel"], sourcePageKey: "payroll" }));
+    expect(mocks.matchConceptsToPages).toHaveBeenCalledWith(expect.objectContaining({
+      concepts: [{ conceptKey: "salary-component", evidenceIds: ["evidence-1"], profile: { parentPageKey: "payroll.monthly" } }],
+      existingPageKeys: ["vessel"],
+      sourcePageKey: "payroll"
+    }));
     expect(db.tasks.some((item) => item.taskType === "CREATE_PAGE" && item.pageKey === "payroll.salary-component")).toBe(true);
     expect(db.tasks.some((item) => item.taskType === "UPDATE_PAGE" && item.pageKey === "vessel")).toBe(true);
     expect(db.tasks[0]).toMatchObject({ status: "SUCCEEDED", branchState: "FOUND_CHILDREN" });
+  });
+
+  it("DISCOVER_RELATED_CONCEPTS queues ATTACH_TO_PAGE as an UPDATE_PAGE for the parent", async () => {
+    mocks.matchConceptsToPages.mockReturnValue([
+      conceptDecision({
+        disposition: "ATTACH_TO_PAGE",
+        pageKey: "payroll",
+        attachToPageKey: "payroll",
+        conceptKey: "status-filter",
+        score: 2,
+        reason: "related concept attaches to parent page"
+      })
+    ]);
+    const db = new FakeDb({
+      runs: [run("AI_GENERATING")],
+      codeMaps: [codeMap([])],
+      wikiPages: [{ workspaceId: "workspace-1", pageKey: "payroll" }],
+      tasks: [task({ taskType: "DISCOVER_RELATED_CONCEPTS", pageKey: "payroll", dedupeKey: "discover-related:root-1:payroll:depth-1", payloadJson: { depth: 1, sourcePageKey: "payroll" } })]
+    });
+    mocks.getDb.mockReturnValue(db);
+
+    await runSelfExpandingGeneration("run-1");
+
+    const updateTask = db.tasks.find((item) => item.taskType === "UPDATE_PAGE" && item.pageKey === "payroll");
+    expect(updateTask).toMatchObject({
+      dedupeKey: "update-page:payroll",
+      payloadJson: {
+        attachedConcept: expect.objectContaining({ disposition: "ATTACH_TO_PAGE", score: 2 }),
+        relatedConcept: expect.objectContaining({ disposition: "ATTACH_TO_PAGE", score: 2 })
+      }
+    });
+    expect(db.debugEvents.find((event) => event.eventType === "TASK_QUEUED" && event.payloadJson.dedupeKey === "update-page:payroll")).toMatchObject({
+      payloadJson: {
+        relatedConceptDecision: {
+          decision: "ATTACH_TO_PAGE",
+          score: 2,
+          parent: "payroll",
+          reason: "related concept attaches to parent page",
+          evidenceCount: 1
+        }
+      }
+    });
   });
 
   it("DISCOVER_RELATED_CONCEPTS records review decisions without creating page tasks", async () => {
@@ -389,6 +488,7 @@ function run(status: string) {
     frontendRepositoryId: "repo-fe",
     backendRepositoryId: "repo-be",
     status,
+    controlState: "ACTIVE",
     coverageReportJson: null,
     createdAt: new Date("2026-01-01T00:00:00Z")
   };

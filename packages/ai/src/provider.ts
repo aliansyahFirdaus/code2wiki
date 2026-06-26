@@ -30,6 +30,9 @@ export type GenerateProductWikiEvidence = {
 export type ProductWikiPageGroup = {
   pageKey: string;
   title: string;
+  languages?: string[];
+  attachedConcept?: unknown;
+  relatedConcept?: unknown;
   facts: GenerateProductWikiFact[];
   evidence: GenerateProductWikiEvidence[];
   existingPage?: {
@@ -48,6 +51,10 @@ export type GenerateProductWikiRepairInput = {
   validationErrors: string[];
 };
 
+export type GenerateProductWikiOptions = {
+  signal?: AbortSignal;
+};
+
 export type ProviderUsage = {
   provider: string;
   model: string;
@@ -59,7 +66,7 @@ export type ProviderUsage = {
   outputCharCount: number;
 };
 
-export type SupportedAIProvider = "openrouter";
+export type SupportedAIProvider = "openrouter" | "nvidia";
 
 export type AIProviderCapabilities = {
   provider: SupportedAIProvider;
@@ -76,6 +83,7 @@ export type AIProviderConfig = {
   model: string;
   apiKey?: string;
   baseUrl?: string;
+  maxRequestsPerMinute?: number;
 };
 
 export type GenerateProductWikiResult = {
@@ -85,7 +93,7 @@ export type GenerateProductWikiResult = {
 
 export type AIProvider = {
   capabilities?: AIProviderCapabilities;
-  generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput): Promise<GenerateProductWikiResult>;
+  generateProductWiki(input: GenerateProductWikiInput, repair?: GenerateProductWikiRepairInput, options?: GenerateProductWikiOptions): Promise<GenerateProductWikiResult>;
 };
 
 export class ProviderConfigurationError extends Error {

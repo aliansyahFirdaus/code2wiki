@@ -14,6 +14,7 @@ import {
   type AiUsageReport,
   type GenerateProductWikiEvidence,
   type GenerateProductWikiFact,
+  type GenerateProductWikiOptions,
   type ProductWikiPageGroup,
   type QualityReport
 } from "@code2wiki/ai";
@@ -23,13 +24,14 @@ import { and, eq, sql } from "drizzle-orm";
 import { runPageValue } from "./incremental-planner";
 import { emitDebugEvent } from "./debug-events";
 import { pageInputHash } from "./page-input";
+import { checkpointRunControl } from "../run-state";
 
 type GenerationRun = typeof generationRuns.$inferSelect;
 type GenerationTask = typeof generationTasks.$inferSelect;
 type PageGroupWithInputHash = ProductWikiPageGroup & { inputHash: string };
 type PageWriteResult =
   | { ok: true; pageKey: string; qualityReport: QualityReport; aiUsageReport: AiUsageReport; generatedStatementCount: number; generatedStatementWithEvidenceCount: number }
-  | { ok: false; status: "AI_OUTPUT_INVALID" | "FAILED"; errorMessage: string; qualityReport?: QualityReport; aiUsageReport?: AiUsageReport };
+  | { ok: false; status: "AI_OUTPUT_INVALID" | "FAILED"; errorMessage: string; retryable?: boolean; qualityReport?: QualityReport; aiUsageReport?: AiUsageReport };
 
 export async function writePageTask(run: GenerationRun, task: GenerationTask): Promise<PageWriteResult> {
   const pageKey = task.pageKey;
@@ -55,7 +57,12 @@ export async function writePageTask(run: GenerationRun, task: GenerationTask): P
       message: "AI page write started.",
       payload: { taskId: task.id, taskType: task.taskType, pageKey, factCount: pageGroup.facts.length, evidenceCount: pageGroup.evidence.length }
     });
-    let generationResult = await provider.generateProductWiki({ generationRunId: run.id, pageGroups: [pageGroup] });
+    const generationControl = await generationOptionsForRun(run.id);
+    let generationResult = await provider.generateProductWiki(
+      { generationRunId: run.id, pageGroups: [pageGroup] },
+      undefined,
+      generationControl.options
+    );
     usageCalls.push(buildAiUsageCall("generation", generationResult.usage));
     let checked = checkOutput({
       generationRunId: run.id,
@@ -79,7 +86,8 @@ export async function writePageTask(run: GenerationRun, task: GenerationTask): P
         {
           invalidOutput: generationResult.output,
           validationErrors: checked.ok ? checked.qualityReport.issues.map((issue) => `${issue.code}: ${issue.message}`) : checked.validationErrors
-        }
+        },
+        generationControl.options
       );
       usageCalls.push(buildAiUsageCall("repair", generationResult.usage));
       checked = checkOutput({
@@ -129,8 +137,22 @@ export async function writePageTask(run: GenerationRun, task: GenerationTask): P
     if (error instanceof StructuredOutputUnsupportedError) {
       return { ok: false, status: "FAILED", errorMessage: "MODEL_DOES_NOT_SUPPORT_STRUCTURED_OUTPUT", qualityReport: invalidOutputQualityReport(), aiUsageReport: buildAiUsageReport(usageCalls) };
     }
-    return { ok: false, status: "FAILED", errorMessage: sanitizeErrorMessage(error), qualityReport: invalidOutputQualityReport(), aiUsageReport: buildAiUsageReport(usageCalls) };
+    const errorMessage = sanitizeErrorMessage(error);
+    return {
+      ok: false,
+      status: "FAILED",
+      errorMessage,
+      retryable: isRetryableProviderFailure(errorMessage),
+      qualityReport: invalidOutputQualityReport(),
+      aiUsageReport: buildAiUsageReport(usageCalls)
+    };
+  } finally {
+    await stopGenerationOptionsForRun(run.id);
   }
+}
+
+function isRetryableProviderFailure(errorMessage: string) {
+  return /^OpenRouter request failed with status (408|409|425|429|5\d\d)\.$/.test(errorMessage);
 }
 
 function checkOutput(input: {
@@ -174,29 +196,45 @@ async function buildPageGroup(run: GenerationRun, task: GenerationTask, pageKey:
     db.select().from(codeSummaries).where(eq(codeSummaries.generationRunId, run.id)),
     db.select().from(wikiPages).where(and(eq(wikiPages.workspaceId, run.workspaceId), eq(wikiPages.pageKey, pageKey))).limit(1)
   ]);
+  const codeMap = (codeMapRows[0]?.mapJson as CodeMap | undefined) ?? null;
+  const allowedEvidenceIds = allowedEvidenceIdsForTask(task, codeMap, evidenceRows);
   const retrieval = buildRetrievalContexts({
     generationRunId: run.id,
     pageKeys: [pageKey],
     facts: factRows,
     evidence: evidenceRows,
-    codeMap: (codeMapRows[0]?.mapJson as CodeMap | undefined) ?? null,
+    codeMap,
     summaries: summaryRows.map((row) => row.summaryJson as CodeSummary)
   });
-  const context = retrieval.contexts.find((item) => item.pageKey === pageKey && item.evidence.length > 0);
-  const fromContext = context ? pageGroupFromContext(pageKey, context, evidenceRows) : null;
-  const pageGroup = usablePageGroup(fromContext) ? fromContext : fallbackPageGroup(pageKey, task, factRows, evidenceRows, context?.evidence.map((item) => item.id));
+  const context = retrieval.contexts.find((item) => item.pageKey === pageKey && item.evidence.some((item) => allowedEvidenceIds.has(item.id)));
+  const fromContext = context ? pageGroupFromContext(pageKey, context, evidenceRows, allowedEvidenceIds) : null;
+  const pageGroup = usablePageGroup(fromContext) ? fromContext : fallbackPageGroup(pageKey, task, factRows, evidenceRows, allowedEvidenceIds);
   if (!pageGroup || pageGroup.facts.length === 0 || pageGroup.evidence.length === 0) {
     return null;
   }
 
-  const inputHash = pageInputHash(pageKey, pageGroup.facts, pageGroup.evidence, codeMapRows[0]?.mapJson ?? null);
+  const inputHash = pageInputHash(pageKey, pageGroup.facts, pageGroup.evidence, codeMap ?? null);
   const existingPage = existingPages[0] ? await existingPageForPrompt(existingPages[0]) : undefined;
-  return { ...pageGroup, ...(existingPage ? { existingPage } : {}), inputHash };
+  return { ...pageGroup, ...pageTaskContext(task), ...(existingPage ? { existingPage } : {}), inputHash };
 }
 
-function pageGroupFromContext(pageKey: string, context: RetrievalContext, evidenceRows: Array<typeof evidence.$inferSelect>): ProductWikiPageGroup {
+function pageTaskContext(task: GenerationTask) {
+  if (!task.payloadJson || typeof task.payloadJson !== "object") return {};
+  const payload = task.payloadJson as { attachedConcept?: unknown; relatedConcept?: unknown };
+  return {
+    ...(payload.attachedConcept ? { attachedConcept: payload.attachedConcept } : {}),
+    ...(payload.relatedConcept ? { relatedConcept: payload.relatedConcept } : {})
+  };
+}
+
+function pageGroupFromContext(
+  pageKey: string,
+  context: RetrievalContext,
+  evidenceRows: Array<typeof evidence.$inferSelect>,
+  allowedEvidenceIds: Set<string>
+): ProductWikiPageGroup {
   const evidenceById = new Map(evidenceRows.map((row) => [row.id, toProviderEvidence(row)]));
-  const evidenceIds = new Set(context.evidence.map((item) => item.id));
+  const evidenceIds = new Set(context.evidence.map((item) => item.id).filter((id) => allowedEvidenceIds.has(id)));
   return {
     pageKey,
     title: titleFromPageKey(pageKey),
@@ -222,10 +260,9 @@ function fallbackPageGroup(
   task: GenerationTask,
   factRows: Array<typeof codeFacts.$inferSelect>,
   evidenceRows: Array<typeof evidence.$inferSelect>,
-  contextEvidenceIds: string[] = []
+  allowedEvidenceIds: Set<string>
 ): ProductWikiPageGroup | null {
-  const payloadEvidenceIds = new Set([...readEvidenceIds(task.payloadJson), ...contextEvidenceIds]);
-  const selectedEvidence = evidenceRows.filter((row) => payloadEvidenceIds.has(row.id) || pageKeyFromPath(row.filePath) === pageKey);
+  const selectedEvidence = evidenceRows.filter((row) => allowedEvidenceIds.has(row.id));
   const selectedEvidenceIds = new Set(selectedEvidence.map((row) => row.id));
   const facts = factRows.filter((fact) => fact.evidenceIds.some((id) => selectedEvidenceIds.has(id)));
   if (selectedEvidence.length === 0) {
@@ -524,6 +561,130 @@ function readEvidenceIds(value: unknown): string[] {
     return [...direct, ...Object.values(value).flatMap(readEvidenceIds)];
   }
   return [];
+}
+
+const generationAbortIntervals = new Map<string, ReturnType<typeof setInterval>>();
+
+async function generationOptionsForRun(generationRunId: string): Promise<{ options: GenerateProductWikiOptions }> {
+  await stopGenerationOptionsForRun(generationRunId);
+  const controller = new AbortController();
+  const checkpoint = await checkpointRunControl({
+    generationRunId,
+    runningStatus: "AI_GENERATING",
+    pausedStatus: "AI_GENERATING"
+  });
+  if (checkpoint.action === "cancel") {
+    controller.abort();
+    return { options: { signal: controller.signal } };
+  }
+  generationAbortIntervals.set(
+    generationRunId,
+    setInterval(() => {
+      void checkpointRunControl({
+        generationRunId,
+        runningStatus: "AI_GENERATING",
+        pausedStatus: "AI_GENERATING"
+      }).then((nextCheckpoint) => {
+        if (nextCheckpoint.action === "cancel") {
+          controller.abort();
+        }
+      }).catch(() => {
+        controller.abort();
+      });
+    }, 250)
+  );
+  return { options: { signal: controller.signal } };
+}
+
+async function stopGenerationOptionsForRun(generationRunId: string) {
+  const interval = generationAbortIntervals.get(generationRunId);
+  if (interval) {
+    clearInterval(interval);
+    generationAbortIntervals.delete(generationRunId);
+  }
+}
+
+function allowedEvidenceIdsForTask(
+  task: GenerationTask,
+  codeMap: CodeMap | null,
+  evidenceRows: Array<typeof evidence.$inferSelect>
+) {
+  const explicitIds = new Set(readEvidenceIds(task.payloadJson));
+  if (!codeMap) {
+    return explicitIds;
+  }
+
+  const sourcePageKey = taskSourcePageKey(task);
+  const sourceNamespace = sourceNamespaceFromPageKey(sourcePageKey ?? task.pageKey ?? undefined);
+  const anchorNodeKeys = new Set(readAnchorNodeKeys(task.payloadJson));
+  const frontendNodeKeys = new Set(
+    codeMap.nodes
+      .filter((node) => node.repositoryRole === "FRONTEND")
+      .filter((node) => anchorNodeKeys.has(node.stableKey) || nodeMatchesSource(node.filePath, sourcePageKey, sourceNamespace))
+      .map((node) => node.stableKey)
+  );
+  const backendNodeKeys = new Set(
+    codeMap.edges
+      .filter((edge) => edge.kind === "CALLS_API" && frontendNodeKeys.has(edge.fromStableKey))
+      .flatMap((edge) => [edge.toStableKey])
+  );
+
+  for (const node of codeMap.nodes) {
+    if (frontendNodeKeys.has(node.stableKey) || backendNodeKeys.has(node.stableKey)) {
+      for (const evidenceId of node.evidenceIds ?? []) {
+        explicitIds.add(evidenceId);
+      }
+    }
+  }
+  for (const edge of codeMap.edges) {
+    if (frontendNodeKeys.has(edge.fromStableKey) && backendNodeKeys.has(edge.toStableKey)) {
+      for (const evidenceId of edge.evidenceIds ?? []) {
+        explicitIds.add(evidenceId);
+      }
+    }
+  }
+
+  const existingIds = new Set(evidenceRows.map((row) => row.id));
+  return new Set([...explicitIds].filter((id) => existingIds.has(id)));
+}
+
+function readAnchorNodeKeys(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const current = typeof record.nodeStableKey === "string" ? [record.nodeStableKey] : [];
+  return [...current, ...Object.values(record).flatMap(readAnchorNodeKeys)];
+}
+
+function taskSourcePageKey(task: GenerationTask): string | null {
+  if (!task.payloadJson || typeof task.payloadJson !== "object") {
+    return task.pageKey ?? null;
+  }
+  const payload = task.payloadJson as Record<string, unknown>;
+  if (typeof payload.sourcePageKey === "string") {
+    return payload.sourcePageKey;
+  }
+  if (typeof payload.pageKey === "string") {
+    return payload.pageKey;
+  }
+  if (payload.frontendAnchor && typeof payload.frontendAnchor === "object") {
+    const nested: string | null = taskSourcePageKey({ ...task, payloadJson: payload.frontendAnchor as Record<string, unknown> });
+    if (nested) return nested;
+  }
+  return task.pageKey ?? null;
+}
+
+function sourceNamespaceFromPageKey(pageKey: string | undefined | null) {
+  if (!pageKey) return null;
+  return normalizePageKey(pageKey).split(".").filter(Boolean)[0] ?? null;
+}
+
+function nodeMatchesSource(filePath: string, sourcePageKey: string | null, sourceNamespace: string | null) {
+  const normalizedSource = normalizePageKey(sourcePageKey ?? "");
+  const nodePageKey = pageKeyFromPath(filePath);
+  if (normalizedSource && nodePageKey === normalizedSource) {
+    return true;
+  }
+  return Boolean(sourceNamespace && (nodePageKey === sourceNamespace || nodePageKey.startsWith(`${sourceNamespace}.`)));
 }
 
 function titleFromPageKey(pageKey: string) {

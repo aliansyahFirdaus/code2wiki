@@ -1,15 +1,31 @@
 import { describe, expect, it } from "vitest";
 
-import { debuggerFlowFromEvents, generationStepState, groupCoverageGaps, mergeDebugEvents, nextActionLabel, severityTone } from "./workspace-ui";
+import { canRequestNextStep, debugEventLabel, debugStageLabel, debuggerFlowFromEvents, debuggerStepForEvent, debuggerStepForTask, executionStateLabel, generationStepState, groupCoverageGaps, mergeDebugEvents, nextActionLabel, runStatusLabel, severityTone, taskTypeLabel } from "./workspace-ui";
 
 describe("workspace UI helpers", () => {
   it("maps generation status to next action labels", () => {
-    expect(nextActionLabel("QUEUED")).toBe("Run clone");
-    expect(nextActionLabel("CLONED")).toBe("Run analyze");
-    expect(nextActionLabel("FACTS_EXTRACTED")).toBe("Run generation");
-    expect(nextActionLabel("AI_GENERATING")).toBe("Run generation");
+    expect(nextActionLabel("QUEUED")).toBe("Worker: Run clone");
+    expect(nextActionLabel("CLONED")).toBe("Worker: Run analyze");
+    expect(nextActionLabel("FACTS_EXTRACTED")).toBe("Worker: Run generation");
+    expect(nextActionLabel("QUEUED", "MANUAL", null)).toBe("Operator: Run clone");
+    expect(nextActionLabel("QUEUED", "MANUAL", "2026-06-26T00:00:00.000Z")).toBe("Run clone queued");
+    expect(nextActionLabel("AI_GENERATING")).toBe("Worker: Run generation");
+    expect(nextActionLabel("AI_GENERATING", "AUTO", null, "PAUSED")).toBe("Operator: Resume run");
+    expect(nextActionLabel("AI_GENERATING", "AUTO", null, "CANCEL_REQUESTED")).toBe("Worker: Stop safely");
     expect(nextActionLabel("NEEDS_REVIEW")).toBe("Blocked / needs review");
     expect(nextActionLabel("COMPLETED")).toBe("Done");
+  });
+
+  it("describes execution state and button availability for manual runs", () => {
+    expect(executionStateLabel("QUEUED", "MANUAL", null)).toBe("Waiting for operator");
+    expect(executionStateLabel("QUEUED", "MANUAL", "2026-06-26T00:00:00.000Z")).toBe("Next step queued");
+    expect(executionStateLabel("CLONING", "AUTO", null)).toBe("Worker in progress");
+    expect(executionStateLabel("AI_GENERATING", "AUTO", null, "PAUSED")).toBe("Paused");
+    expect(executionStateLabel("AI_GENERATING", "AUTO", null, "CANCEL_REQUESTED")).toBe("Cancel requested");
+    expect(canRequestNextStep("QUEUED", "MANUAL")).toBe(true);
+    expect(canRequestNextStep("QUEUED", "AUTO")).toBe(false);
+    expect(canRequestNextStep("AI_GENERATING", "MANUAL")).toBe(false);
+    expect(canRequestNextStep("QUEUED", "MANUAL", "PAUSED")).toBe(false);
   });
 
   it("maps generation status to compact step states", () => {
@@ -17,17 +33,39 @@ describe("workspace UI helpers", () => {
       { label: "Queue", state: "done" },
       { label: "Clone", state: "done" },
       { label: "Analyze", state: "done" },
-      { label: "Generate", state: "active" },
-      { label: "Coverage", state: "pending" },
+      { label: "Explore", state: "active" },
+      { label: "Write", state: "pending" },
+      { label: "Check", state: "pending" },
       { label: "Done", state: "pending" }
     ]);
     expect(generationStepState("COMPLETED").every((step) => step.state === "done")).toBe(true);
+    expect(generationStepState("CANCELED")[6]).toMatchObject({ label: "Done", state: "done" });
+    expect(generationStepState("AI_OUTPUT_INVALID")[4]).toMatchObject({ label: "Write", state: "error" });
+    expect(generationStepState("NEEDS_REVIEW")[5]).toMatchObject({ label: "Check", state: "error" });
   });
 
   it("maps severity to dashboard tones", () => {
     expect(severityTone("INFO")).toBe("neutral");
     expect(severityTone("WARN")).toBe("amber");
     expect(severityTone("ERROR")).toBe("red");
+  });
+
+  it("maps debugger enum values to readable labels", () => {
+    expect(debugEventLabel("QUALITY_GATE_FAILED")).toBe("Quality Gate Failed");
+    expect(debugEventLabel("TASK_QUEUED")).toBe("Task queued");
+    expect(debugStageLabel("page_writer")).toBe("Page writer");
+    expect(taskTypeLabel("CREATE_PAGE")).toBe("Create page");
+    expect(runStatusLabel("NEEDS_REVIEW")).toBe("Needs review");
+    expect(runStatusLabel("CANCELED")).toBe("Force stopped");
+  });
+
+  it("maps tasks and events to debugger steps", () => {
+    expect(debuggerStepForTask("DISCOVER_RELATED_CONCEPTS")).toBe("Explore");
+    expect(debuggerStepForTask("CREATE_PAGE")).toBe("Write");
+    expect(debuggerStepForTask("EVALUATE_COVERAGE")).toBe("Check");
+    expect(debuggerStepForEvent({ id: "1", eventType: "CLONE_STARTED", severity: "INFO", stage: "clone" })).toBe("Clone");
+    expect(debuggerStepForEvent({ id: "2", eventType: "ANALYZE_DONE", severity: "INFO", stage: "analyze" })).toBe("Analyze");
+    expect(debuggerStepForEvent({ id: "3", eventType: "TASK_STARTED", severity: "INFO", payloadJson: { taskType: "UPDATE_PAGE" } })).toBe("Write");
   });
 
   it("merges debug events by id and caps the newest 200", () => {

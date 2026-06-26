@@ -2,6 +2,8 @@ import { getDb, generationRuns, repositories } from "@code2wiki/db";
 import { createGitHubInstallationAccessToken, cloneRepositoryAtCommit, type RepositoryCheckout } from "@code2wiki/github";
 import { and, asc, eq } from "drizzle-orm";
 import { assertGenerationRepositoryRoles } from "./role-mapping";
+import { checkpointRunControl } from "./run-state";
+import { emitDebugEvent } from "./self-expanding-generation/debug-events";
 
 type CloneRepositoryResult =
   | { status: "skipped"; reason: string }
@@ -23,6 +25,7 @@ export async function cloneRepository(generationRunId?: string): Promise<CloneRe
   }
 
   const checkouts: RepositoryCheckout[] = [];
+  const abortController = new AbortController();
 
   try {
     const [frontendRepository, backendRepository] = await Promise.all([
@@ -30,6 +33,18 @@ export async function cloneRepository(generationRunId?: string): Promise<CloneRe
       getActiveRepository(claimedRun.backendRepositoryId)
     ]);
     assertGenerationRepositoryRoles(frontendRepository, backendRepository);
+    await emitDebugEvent({
+      generationRunId: claimedRun.id,
+      stage: "clone",
+      eventType: "CLONE_STARTED",
+      message: "Repository clone started.",
+      payload: {
+        frontendRepository: frontendRepository.repositoryFullName,
+        frontendCommitSha: claimedRun.frontendCommitSha,
+        backendRepository: backendRepository.repositoryFullName,
+        backendCommitSha: claimedRun.backendCommitSha
+      }
+    });
 
     const tokenByInstallationId = new Map<string, string>();
     const getInstallationToken = async (installationId: string) => {
@@ -43,21 +58,57 @@ export async function cloneRepository(generationRunId?: string): Promise<CloneRe
       return token;
     };
 
+    const beforeFrontendClone = await checkpointRunControl({
+      generationRunId: claimedRun.id,
+      runningStatus: "CLONING",
+      pausedStatus: "QUEUED"
+    });
+    if (beforeFrontendClone.action !== "continue") {
+      return beforeFrontendClone.action === "cancel"
+        ? { status: "failed", generationRunId: claimedRun.id, errorMessage: "RUN_CANCELED" }
+        : { status: "skipped", reason: "RUN_PAUSED" };
+    }
+
     const frontendCheckout = await cloneRepositoryAtCommit({
       owner: frontendRepository.owner,
       repo: frontendRepository.repo,
       commitSha: claimedRun.frontendCommitSha,
-      token: await getInstallationToken(frontendRepository.githubInstallationId)
+      token: await getInstallationToken(frontendRepository.githubInstallationId),
+      signal: abortController.signal
     });
     checkouts.push(frontendCheckout);
+
+    const beforeBackendClone = await checkpointRunControl({
+      generationRunId: claimedRun.id,
+      runningStatus: "CLONING",
+      pausedStatus: "QUEUED"
+    });
+    if (beforeBackendClone.action !== "continue") {
+      abortController.abort();
+      return beforeBackendClone.action === "cancel"
+        ? { status: "failed", generationRunId: claimedRun.id, errorMessage: "RUN_CANCELED" }
+        : { status: "skipped", reason: "RUN_PAUSED" };
+    }
 
     const backendCheckout = await cloneRepositoryAtCommit({
       owner: backendRepository.owner,
       repo: backendRepository.repo,
       commitSha: claimedRun.backendCommitSha,
-      token: await getInstallationToken(backendRepository.githubInstallationId)
+      token: await getInstallationToken(backendRepository.githubInstallationId),
+      signal: abortController.signal
     });
     checkouts.push(backendCheckout);
+
+    const beforeFinalize = await checkpointRunControl({
+      generationRunId: claimedRun.id,
+      runningStatus: "CLONING",
+      pausedStatus: "QUEUED"
+    });
+    if (beforeFinalize.action !== "continue") {
+      return beforeFinalize.action === "cancel"
+        ? { status: "failed", generationRunId: claimedRun.id, errorMessage: "RUN_CANCELED" }
+        : { status: "skipped", reason: "RUN_PAUSED" };
+    }
 
     await db
       .update(generationRuns)
@@ -66,6 +117,18 @@ export async function cloneRepository(generationRunId?: string): Promise<CloneRe
         errorMessage: null
       })
       .where(eq(generationRuns.id, claimedRun.id));
+    await emitDebugEvent({
+      generationRunId: claimedRun.id,
+      stage: "clone",
+      eventType: "CLONE_DONE",
+      message: "Repository clone completed.",
+      payload: {
+        frontendRepository: frontendRepository.repositoryFullName,
+        frontendHead: frontendCheckout.head,
+        backendRepository: backendRepository.repositoryFullName,
+        backendHead: backendCheckout.head
+      }
+    });
 
     return {
       status: "cloned",
@@ -83,6 +146,14 @@ export async function cloneRepository(generationRunId?: string): Promise<CloneRe
         finishedAt: new Date()
       })
       .where(eq(generationRuns.id, claimedRun.id));
+    await emitDebugEvent({
+      generationRunId: claimedRun.id,
+      stage: "clone",
+      eventType: "CLONE_FAILED",
+      severity: "ERROR",
+      message: "Repository clone failed.",
+      payload: { errorMessage }
+    });
 
     return {
       status: "failed",

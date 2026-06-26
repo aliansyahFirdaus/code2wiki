@@ -12,6 +12,9 @@ export function toGenerationRunResponse(run: typeof generationRuns.$inferSelect,
     backendTag: run.backendTag,
     backendCommitSha: run.backendCommitSha,
     status: run.status,
+    executionMode: run.executionMode,
+    controlState: run.controlState,
+    advanceRequestedAt: run.advanceRequestedAt?.toISOString() ?? null,
     totalEligibleFiles: run.totalEligibleFiles,
     indexedEligibleFiles: run.indexedEligibleFiles,
     frontendTotalEligibleFiles: run.frontendTotalEligibleFiles,
@@ -22,6 +25,7 @@ export function toGenerationRunResponse(run: typeof generationRuns.$inferSelect,
     generatedStatementWithEvidenceCount: run.generatedStatementWithEvidenceCount,
     qualityGateResult: qualityGateResult(run.qualityReportJson),
     qualityIssueCounts: qualityIssueCounts(run.qualityReportJson),
+    qualityIssues: qualityIssues(run.qualityReportJson),
     aiUsageSummary: aiUsageSummary(run.aiUsageJson),
     incrementalSummary: incrementalSummary(run.incrementalReportJson),
     coverageSummary: coverageSummary(run.coverageReportJson),
@@ -57,10 +61,27 @@ function qualityIssueCounts(value: unknown) {
   );
 }
 
+function qualityIssues(value: unknown) {
+  if (!isRecord(value) || !Array.isArray(value.issues)) {
+    return [];
+  }
+  return value.issues
+    .filter(isRecord)
+    .map((issue) => ({
+      severity: issue.severity === "ERROR" || issue.severity === "WARN" ? issue.severity : null,
+      code: typeof issue.code === "string" ? issue.code : null,
+      message: typeof issue.message === "string" ? issue.message : null
+    }))
+    .filter((issue) => issue.severity && issue.code && issue.message)
+    .slice(0, 5);
+}
+
 function aiUsageSummary(value: unknown) {
   if (!isRecord(value) || !isRecord(value.summary)) return null;
   const summary = value.summary;
   return {
+    provider: typeof summary.provider === "string" ? summary.provider : null,
+    model: typeof summary.model === "string" ? summary.model : null,
     callCount: numberOrNull(summary.callCount),
     promptTokens: numberOrNull(summary.promptTokens),
     completionTokens: numberOrNull(summary.completionTokens),

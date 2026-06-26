@@ -22,6 +22,9 @@ const systemPrompt = [
   "Do not expose local paths, secrets, tokens, env values, Authorization headers, provider metadata, or raw hidden context.",
   "Write user-facing product stories, not implementation explanations.",
   "Do not use technical implementation terms such as API, endpoint, handler, SQL, database, frontend, backend, component, route, function, schema, or code identifiers unless that exact term is visibly user-facing in the product evidence.",
+  "When a pageGroup includes attachedConcept or relatedConcept payloads, place that evidence inside the relevant section of the provided pageKey; do not create a separate page unless that pageKey is allowed.",
+  "When a pageGroup requests languages exactly [\"id\",\"en\"], every user-facing block must include Indonesian and English content in the same block text, labeled ID: and EN:.",
+  "Missing or weak evidence becomes open_question, never invented product behavior.",
   "Valid minimal example: {\"pages\":[{\"pageKey\":\"payroll.vessel-bonus\",\"title\":\"Payroll Vessel Bonus\",\"blocks\":[{\"type\":\"title\",\"text\":\"Payroll Vessel Bonus\"},{\"type\":\"statement\",\"text\":\"Users can review Vessel Bonus payroll values before recalculating payroll.\",\"evidenceIds\":[\"ev_manual_1\"],\"confidence\":0.9}]}]}"
 ].join("\n");
 
@@ -52,6 +55,7 @@ const styleGuide = [
   "Audience: product, operations, support, QA, and implementation readers who need product behavior without implementation prose.",
   "Write complete product docs, not terse bullet dumps.",
   "Use the internal module template when evidence supports it: Ringkasan, Siapa Yang Menggunakan Modul Ini, Kapan Modul Ini Digunakan, Konsep Penting, Data Yang Dikelola, Alur Kerja Utama, Hubungan Dengan Modul Lain, Aturan Bisnis, Contoh Penggunaan, Hal Yang Sering Membingungkan, Yang Perlu Dicek Jika Ada Masalah, Catatan Internal.",
+  "Attach field, button, filter, validation, loading, empty, error, and permission details to the closest relevant section on the current page.",
   "Ringkasan may be a 2-4 paragraph story, but every behavior claim must stay evidence-backed.",
   "Make the page read like a clear feature story: context, user goal, main flow, important variations, business rules, permissions, side effects, empty/error states, and operational impact.",
   "Use natural section headings and combine related evidence into coherent statements when the evidence directly supports the same user-visible behavior.",

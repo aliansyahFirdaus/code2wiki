@@ -7,7 +7,8 @@ const mocks = vi.hoisted(() => ({
   generationDebugEvents: {
     id: "generation_debug_events.id",
     generationRunId: "generation_debug_events.generation_run_id",
-    createdAt: "generation_debug_events.created_at"
+    createdAt: "generation_debug_events.created_at",
+    stage: "generation_debug_events.stage"
   },
   generationRuns: { id: "generation_runs.id" },
   generationTasks: { generationRunId: "generation_tasks.generation_run_id" },
@@ -17,8 +18,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("drizzle-orm", () => ({
   and: vi.fn((...conditions: unknown[]) => ({ type: "and", conditions })),
   asc: vi.fn((field: string) => field),
+  desc: vi.fn((field: string) => ({ field, direction: "desc" })),
   eq: vi.fn((field: string, value: unknown) => ({ type: "eq", field, value })),
   gt: vi.fn((field: string, value: unknown) => ({ type: "gt", field, value })),
+  lt: vi.fn((field: string, value: unknown) => ({ type: "lt", field, value })),
   or: vi.fn((...conditions: unknown[]) => ({ type: "or", conditions }))
 }));
 
@@ -41,6 +44,10 @@ describe("loadGenerationDebugEvents", () => {
 
     expect(result?.events.map((event) => event.id)).toEqual(["event-2", "event-3"]);
     expect(result?.nextAfterId).toBe("event-3");
+    expect(result?.hasMoreAfter).toBe(true);
+    expect(result?.totalEventCount).toBe(4);
+    expect(result?.run).toMatchObject({ id: "run-1", status: "AI_GENERATING", frontendCommitSha: "fe-sha", backendCommitSha: "be-sha" });
+    expect(result?.tasks[0]).toMatchObject({ id: "task-1", taskType: "CREATE_PAGE", status: "QUEUED", payloadJson: { pageKey: "users" } });
     expect(result?.summary.taskCounts).toMatchObject({ queued: 1, inProgress: 1, written: 1 });
     expect(result?.summary.pageKeys).toMatchObject({ written: ["users"], reused: ["settings"], affected: ["users"] });
     expect(result?.summary.coverage.gaps).toEqual([{ disposition: "NEEDS_REVIEW", pageKey: "users", evidenceId: "ev-1", factId: "fact-1", reason: "NO_FRONTEND_ANCHOR" }]);
@@ -54,18 +61,51 @@ describe("loadGenerationDebugEvents", () => {
 
     expect(result?.events.map((event) => event.id)).toEqual(["event-2", "event-3", "event-4"]);
   });
+
+  it("loads the latest page first and pages older events backward", async () => {
+    const db = new FakeDb();
+    mocks.getDb.mockReturnValue(db);
+
+    const latest = await loadGenerationDebugEvents({ generationRunId: "run-1", tail: true, limit: 2 });
+    expect(latest?.events.map((event) => event.id)).toEqual(["event-3", "event-4"]);
+    expect(latest?.previousBeforeId).toBe("event-3");
+    expect(latest?.hasMoreBefore).toBe(true);
+    expect(latest?.totalEventCount).toBe(4);
+
+    const older = await loadGenerationDebugEvents({ generationRunId: "run-1", beforeId: "event-3", limit: 2 });
+    expect(older?.events.map((event) => event.id)).toEqual(["event-1", "event-2"]);
+    expect(older?.hasMoreBefore).toBe(false);
+  });
 });
 
 class FakeDb {
   runs = [{
     id: "run-1",
     status: "AI_GENERATING",
+    workspaceId: "workspace-1",
+    frontendRepositoryId: "repo-fe",
+    backendRepositoryId: "repo-be",
+    frontendTag: "fe-v1",
+    frontendCommitSha: "fe-sha",
+    backendTag: "be-v1",
+    backendCommitSha: "be-sha",
+    totalEligibleFiles: 10,
+    indexedEligibleFiles: 8,
+    frontendTotalEligibleFiles: 4,
+    frontendIndexedEligibleFiles: 4,
+    backendTotalEligibleFiles: 6,
+    backendIndexedEligibleFiles: 4,
+    generatedStatementCount: 3,
+    generatedStatementWithEvidenceCount: 2,
     incrementalReportJson: { affectedPageKeys: ["users"] },
     coverageReportJson: {
       counts: { reviewGaps: 1 },
       gaps: [{ disposition: "NEEDS_REVIEW", pageKey: "users", evidenceId: "ev-1", factId: "fact-1", reason: "NO_FRONTEND_ANCHOR", summary: "hidden" }]
     },
-    errorMessage: null
+    errorMessage: null,
+    startedAt: null,
+    finishedAt: null,
+    createdAt: new Date("2026-01-01T00:00:00.000Z")
   }];
   events = [
     event("event-1", "2026-01-01T00:00:01.000Z"),
@@ -74,9 +114,9 @@ class FakeDb {
     event("event-4", "2026-01-01T00:00:04.000Z")
   ];
   tasks = [
-    { generationRunId: "run-1", id: "task-1", status: "QUEUED", taskType: "CREATE_PAGE", pageKey: "users", repositoryRole: "FRONTEND" },
-    { generationRunId: "run-1", id: "task-2", status: "IN_PROGRESS", taskType: "EVALUATE_COVERAGE", pageKey: null, repositoryRole: null },
-    { generationRunId: "run-1", id: "task-3", status: "WRITTEN", taskType: "UPDATE_PAGE", pageKey: "settings", repositoryRole: "FRONTEND" }
+    task("task-1", "QUEUED", "CREATE_PAGE", "users", "FRONTEND"),
+    task("task-2", "IN_PROGRESS", "EVALUATE_COVERAGE", null, null),
+    task("task-3", "WRITTEN", "UPDATE_PAGE", "settings", "FRONTEND")
   ];
   pages = [
     { generationRunId: "run-1", pageKey: "users", materializationType: "WRITTEN" },
@@ -100,6 +140,7 @@ class SelectBuilder {
   private table: unknown;
   private condition: unknown;
   private limitValue?: number;
+  private descending = false;
 
   constructor(private db: FakeDb) {}
 
@@ -113,7 +154,8 @@ class SelectBuilder {
     return this;
   }
 
-  orderBy() {
+  orderBy(...args: Array<{ direction?: string } | string>) {
+    this.descending = args.some((item) => typeof item === "object" && item?.direction === "desc");
     return this;
   }
 
@@ -129,6 +171,7 @@ class SelectBuilder {
   private async exec() {
     const rows = this.db.rows(this.table).filter((row) => matches(row, this.condition));
     rows.sort((left: any, right: any) => left.createdAt?.getTime?.() - right.createdAt?.getTime?.() || String(left.id).localeCompare(String(right.id)));
+    if (this.descending) rows.reverse();
     return typeof this.limitValue === "number" ? rows.slice(0, this.limitValue) : rows;
   }
 }
@@ -137,12 +180,42 @@ function event(id: string, createdAt: string) {
   return { id, generationRunId: "run-1", stage: "task_queue", eventType: "TASK_STARTED", severity: "INFO", message: id, payloadJson: {}, createdAt: new Date(createdAt) };
 }
 
+function task(id: string, status: string, taskType: string, pageKey: string | null, repositoryRole: string | null) {
+  return {
+    generationRunId: "run-1",
+    workspaceId: "workspace-1",
+    id,
+    status,
+    taskType,
+    pageKey,
+    repositoryRole,
+    repositoryId: null,
+    branchState: null,
+    priority: 100,
+    parentTaskId: null,
+    rootTaskId: null,
+    dedupeKey: `${taskType}:${pageKey ?? id}`,
+    reason: "test task",
+    payloadJson: { pageKey },
+    resultJson: null,
+    attempts: 0,
+    maxAttempts: 3,
+    errorMessage: null,
+    claimedAt: null,
+    startedAt: null,
+    finishedAt: null,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z")
+  };
+}
+
 function matches(row: Record<string, unknown>, condition: any): boolean {
   if (!condition) return true;
   if (condition.type === "and") return condition.conditions.every((item: unknown) => matches(row, item));
   if (condition.type === "or") return condition.conditions.some((item: unknown) => matches(row, item));
   if (condition.type === "eq") return row[columnName(condition.field)] === condition.value;
   if (condition.type === "gt") return (row[columnName(condition.field)] as Date | string) > condition.value;
+  if (condition.type === "lt") return (row[columnName(condition.field)] as Date | string) < condition.value;
   return true;
 }
 

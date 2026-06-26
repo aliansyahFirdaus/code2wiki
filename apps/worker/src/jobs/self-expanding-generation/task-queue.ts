@@ -5,6 +5,7 @@ import { currentCoverageFingerprint, evaluateCoverage } from "./coverage-evaluat
 import { emitDebugEvent } from "./debug-events";
 import { materializedPageCount, planIncrementalRun } from "./incremental-planner";
 import { writePageTask } from "./page-writer";
+import { cancelRun, checkpointRunControl } from "../run-state";
 
 const STALE_IN_PROGRESS_MS = 15 * 60 * 1000;
 const FRONTEND_SURFACE_KINDS = new Set(["UI_ROUTE", "REACT_COMPONENT", "NAVIGATION"]);
@@ -58,6 +59,14 @@ export async function runSelfExpandingGeneration(generationRunId?: string): Prom
     const seeded = incremental.seeded + (incremental.mode === "FULL" ? await seedDiscoverSurfaceTasks(run, requireSeedArtifact) : 0);
     let processed = 0;
     for (;;) {
+      const checkpoint = await checkpointRunControl({
+        generationRunId: run.id,
+        runningStatus: "AI_GENERATING",
+        pausedStatus: "AI_GENERATING"
+      });
+      if (checkpoint.action !== "continue") {
+        break;
+      }
       const task = await claimNextTask(run.id);
       if (!task) {
         if (!(await ensureCoverageEvaluationTask(run))) {
@@ -65,8 +74,11 @@ export async function runSelfExpandingGeneration(generationRunId?: string): Prom
         }
         continue;
       }
-      await processTask(run, task);
+      const shouldStop = await processTask(run, task);
       processed += 1;
+      if (shouldStop) {
+        break;
+      }
       if (task.taskType === "EVALUATE_COVERAGE") {
         break;
       }
@@ -100,6 +112,7 @@ async function claimFactsExtractedRun(generationRunId?: string) {
       .update(generationRuns)
       .set({
         status: "AI_GENERATING",
+        controlState: "ACTIVE",
         generatedStatementCount: 0,
         generatedStatementWithEvidenceCount: 0,
         qualityReportJson: null,
@@ -123,6 +136,7 @@ async function claimFactsExtractedRun(generationRunId?: string) {
       .update(generationRuns)
       .set({
         status: "AI_GENERATING",
+        controlState: "ACTIVE",
         generatedStatementCount: 0,
         generatedStatementWithEvidenceCount: 0,
         qualityReportJson: null,
@@ -140,7 +154,9 @@ async function claimFactsExtractedRun(generationRunId?: string) {
 
 async function resumableAiGeneratingRun(generationRunId?: string) {
   const db = getDb();
-  const query = generationRunId ? and(eq(generationRuns.id, generationRunId), eq(generationRuns.status, "AI_GENERATING")) : eq(generationRuns.status, "AI_GENERATING");
+  const query = generationRunId
+    ? and(eq(generationRuns.id, generationRunId), eq(generationRuns.status, "AI_GENERATING"), eq(generationRuns.controlState, "ACTIVE"))
+    : and(eq(generationRuns.status, "AI_GENERATING"), eq(generationRuns.controlState, "ACTIVE"));
   const [run] = await db.select().from(generationRuns).where(query).orderBy(asc(generationRuns.createdAt)).limit(1);
   if (!run) {
     return null;
@@ -207,6 +223,14 @@ async function seedDiscoverSurfaceTasks(run: GenerationRun, requireArtifact: boo
 }
 
 async function claimNextTask(generationRunId: string) {
+  const checkpoint = await checkpointRunControl({
+    generationRunId,
+    runningStatus: "AI_GENERATING",
+    pausedStatus: "AI_GENERATING"
+  });
+  if (checkpoint.action !== "continue") {
+    return null;
+  }
   const db = getDb();
   const [nextTask] = await db
     .select()
@@ -266,13 +290,29 @@ async function claimNextTask(generationRunId: string) {
 }
 
 async function processTask(run: GenerationRun, task: GenerationTask) {
+  const checkpoint = await checkpointRunControl({
+    generationRunId: run.id,
+    runningStatus: "AI_GENERATING",
+    pausedStatus: "AI_GENERATING"
+  });
+  if (checkpoint.action !== "continue") {
+    if (checkpoint.action === "cancel") {
+      await finishTask(task.id, {
+        status: "CANCELED",
+        errorMessage: "RUN_CANCELED",
+        resultJson: { reason: "RUN_CANCELED" }
+      }, task);
+    }
+    return true;
+  }
+
   if (task.repositoryRole === "BACKEND" && !hasFrontendAnchor(task)) {
     await finishTask(task.id, {
       status: "NEEDS_REVIEW",
       branchState: "NEEDS_FRONTEND_ANCHOR",
       resultJson: { reason: "backend task has no frontend anchor" }
     }, task);
-    return;
+    return false;
   }
 
   if (task.taskType === "DISCOVER_SURFACE") {
@@ -294,7 +334,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       branchState: "FOUND_CHILDREN",
       resultJson: { queued: [`trace-behavior:${task.pageKey}`] }
     }, task);
-    return;
+    return false;
   }
 
   if (task.taskType === "TRACE_BEHAVIOR") {
@@ -339,12 +379,12 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       branchState: "WAITING_RELATED_BRANCH",
       resultJson: { queued }
     }, task);
-    return;
+    return false;
   }
 
   if (task.taskType === "DISCOVER_RELATED_CONCEPTS") {
     await processRelatedConceptTask(run, task);
-    return;
+    return false;
   }
 
   if (task.taskType === "CREATE_PAGE" || task.taskType === "UPDATE_PAGE") {
@@ -360,7 +400,17 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
           aiCallCount: result.aiUsageReport.summary.callCount
         }
       }, task);
-      return;
+      return false;
+    }
+
+    if (result.retryable && task.attempts < task.maxAttempts) {
+      await requeueTask(task, result.errorMessage, {
+        reason: result.status,
+        retryable: true,
+        aiCallCount: result.aiUsageReport?.summary.callCount ?? 0,
+        attemptsRemaining: task.maxAttempts - task.attempts
+      });
+      return true;
     }
 
     await finishTask(task.id, {
@@ -386,7 +436,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
       message: "Generation run failed during page writing.",
       payload: { status: result.status, errorMessage: result.errorMessage }
     });
-    return;
+    return false;
   }
 
   if (task.taskType === "EVALUATE_COVERAGE") {
@@ -397,7 +447,7 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
         errorMessage: result.errorMessage,
         resultJson: { reason: "COVERAGE_EVALUATOR_FAILED" }
       }, task);
-      return;
+      return false;
     }
     if (result.queuedTaskDedupeKeys.length > 0) {
       await finishTask(task.id, {
@@ -405,23 +455,24 @@ async function processTask(run: GenerationRun, task: GenerationTask) {
         branchState: "FOUND_CHILDREN",
         resultJson: { fingerprint: result.report.fingerprint, queued: result.queuedTaskDedupeKeys }
       }, task);
-      return;
+      return false;
     }
     if (result.reviewGaps.length > 0) {
       await finishTask(task.id, {
         status: "NEEDS_REVIEW",
         resultJson: { fingerprint: result.report.fingerprint, reason: "COVERAGE_REQUIRES_REVIEW", gaps: result.reviewGaps }
       }, task);
-      return;
+      return false;
     }
     await finishTask(task.id, {
       status: "SUCCEEDED",
       resultJson: { fingerprint: result.report.fingerprint, acceptable: result.report.acceptable }
     }, task);
-    return;
+    return false;
   }
 
   await finishTask(task.id, { status: "FAILED", errorMessage: "UNKNOWN_TASK_TYPE", resultJson: { reason: "unknown task type" } }, task);
+  return false;
 }
 
 async function insertTask(value: {
@@ -468,7 +519,8 @@ async function insertTask(value: {
         taskType: value.taskType,
         pageKey: value.pageKey ?? null,
         dedupeKey: value.dedupeKey,
-        repositoryRole: value.repositoryRole ?? null
+        repositoryRole: value.repositoryRole ?? null,
+        relatedConceptDecision: debugConceptDecision(value.payloadJson)
       }
     });
   }
@@ -495,7 +547,9 @@ async function processRelatedConceptTask(run: GenerationRun, task: GenerationTas
     db.select().from(wikiPages).where(eq(wikiPages.workspaceId, run.workspaceId))
   ]);
   const codeMap = readCodeMap(codeMapRows[0]?.mapJson);
-  const concepts = deriveProductConcepts({ facts: factRows, evidence: evidenceRows, codeMap });
+  const concepts = deriveProductConcepts({ facts: factRows, evidence: evidenceRows, codeMap }).filter((concept) =>
+    isConceptRelevantToSourcePage(concept, sourcePageKey)
+  );
   const decisions = matchConceptsToPages({
     concepts,
     existingPageKeys: existingPages.map((page) => page.pageKey).filter((pageKey): pageKey is string => typeof pageKey === "string"),
@@ -505,25 +559,28 @@ async function processRelatedConceptTask(run: GenerationRun, task: GenerationTas
   const queued: string[] = [];
   const needsReview = decisions.filter((decision) => decision.disposition === "NEEDS_REVIEW");
   const excluded = decisions.filter((decision) => decision.disposition === "EXCLUDED_NO_WIKI_VALUE");
-  for (const decision of decisions.filter(isWritableDecision)) {
-    const dedupeKey = `${decision.disposition === "UPDATE_PAGE" ? "update" : "create"}-page:${decision.pageKey}`;
+  for (const decision of decisions.filter(isQueueableDecision)) {
+    const taskType = decision.disposition === "CREATE_PAGE" ? "CREATE_PAGE" : "UPDATE_PAGE";
+    const pageKey = decision.disposition === "ATTACH_TO_PAGE" ? decision.attachToPageKey ?? decision.pageKey : decision.pageKey;
+    const dedupeKey = `${taskType === "UPDATE_PAGE" ? "update" : "create"}-page:${pageKey}`;
     if (await insertTask({
       generationRunId: run.id,
       workspaceId: run.workspaceId,
       repositoryRole: "FRONTEND",
       repositoryId: run.frontendRepositoryId,
-      taskType: decision.disposition,
-      pageKey: decision.pageKey,
+      taskType,
+      pageKey,
       parentTaskId: task.id,
       rootTaskId: task.rootTaskId ?? task.id,
       dedupeKey,
       reason: decision.reason,
       payloadJson: {
-        pageKey: decision.pageKey,
+        pageKey,
         conceptKey: decision.conceptKey,
         evidenceIds: decision.evidenceIds,
         sourcePageKey,
         depth,
+        ...(decision.disposition === "ATTACH_TO_PAGE" ? { attachedConcept: decision } : {}),
         relatedConcept: decision
       }
     })) {
@@ -557,7 +614,7 @@ async function processRelatedConceptTask(run: GenerationRun, task: GenerationTas
 async function finishTask(
   taskId: string,
   value: {
-    status: "SUCCEEDED" | "READY_TO_WRITE" | "WRITTEN" | "NO_WIKI_VALUE" | "NEEDS_REVIEW" | "FAILED";
+    status: "SUCCEEDED" | "READY_TO_WRITE" | "WRITTEN" | "NO_WIKI_VALUE" | "NEEDS_REVIEW" | "CANCELED" | "FAILED";
     branchState?: "FOUND_CHILDREN" | "WAITING_RELATED_BRANCH" | "NEEDS_FRONTEND_ANCHOR";
     resultJson?: Record<string, unknown>;
     errorMessage?: string | null;
@@ -582,10 +639,38 @@ async function finishTask(
       stage: "task_queue",
       eventType: value.status === "FAILED" ? "TASK_FAILED" : "TASK_FINISHED",
       severity: value.status === "FAILED" ? "ERROR" : value.status === "NEEDS_REVIEW" ? "WARN" : "INFO",
-      message: value.status === "FAILED" ? "Generation task failed." : "Generation task finished.",
+      message:
+        value.status === "FAILED"
+          ? "Generation task failed."
+          : value.status === "CANCELED"
+            ? "Generation task canceled."
+            : "Generation task finished.",
       payload: { ...taskPayload(task), status: value.status, errorMessage: value.errorMessage ?? null }
     });
   }
+}
+
+async function requeueTask(task: GenerationTask, errorMessage: string, resultJson: Record<string, unknown>) {
+  const db = getDb();
+  await db
+    .update(generationTasks)
+    .set({
+      status: "QUEUED",
+      resultJson,
+      errorMessage,
+      claimedAt: null,
+      startedAt: null,
+      updatedAt: new Date()
+    })
+    .where(eq(generationTasks.id, task.id));
+  await emitDebugEvent({
+    generationRunId: task.generationRunId,
+    stage: "task_queue",
+    eventType: "TASK_REQUEUED",
+    severity: "WARN",
+    message: "Generation task re-queued after retryable failure.",
+    payload: { ...taskPayload(task), status: "QUEUED", errorMessage, ...resultJson }
+  });
 }
 
 async function pageExists(workspaceId: string, pageKey: string | null) {
@@ -633,7 +718,22 @@ async function ensureCoverageEvaluationTask(run: GenerationRun) {
 async function finalizeRunIfTerminal(generationRunId: string) {
   const db = getDb();
   const [run] = await db.select().from(generationRuns).where(eq(generationRuns.id, generationRunId)).limit(1);
-  if (!run || (run.status !== "AI_GENERATING" && run.status !== "VALIDATING")) {
+  if (!run) {
+    return;
+  }
+  if (run.controlState === "CANCEL_REQUESTED") {
+    await cancelRun(generationRunId);
+    await emitDebugEvent({
+      generationRunId,
+      stage: "completion",
+      eventType: "RUN_CANCELED",
+      severity: "WARN",
+      message: "Generation run canceled.",
+      payload: { status: "CANCELED" }
+    });
+    return;
+  }
+  if (run.status !== "AI_GENERATING" && run.status !== "VALIDATING") {
     return;
   }
 
@@ -654,6 +754,10 @@ async function finalizeRunIfTerminal(generationRunId: string) {
       message: "Generation run failed.",
       payload: { errorMessage: "GENERATION_TASK_FAILED" }
     });
+    return;
+  }
+  if (tasks.every((task) => task.status === "CANCELED")) {
+    await cancelRun(generationRunId);
     return;
   }
 
@@ -723,8 +827,50 @@ function taskSourcePageKey(task: GenerationTask) {
   return typeof sourcePageKey === "string" && sourcePageKey ? sourcePageKey : task.pageKey ?? undefined;
 }
 
-function isWritableDecision(decision: ConceptPageDecision): decision is ConceptPageDecision & { disposition: "CREATE_PAGE" | "UPDATE_PAGE" } {
-  return decision.disposition === "CREATE_PAGE" || decision.disposition === "UPDATE_PAGE";
+function isConceptRelevantToSourcePage(
+  concept: { conceptKey: string; profile?: { parentPageKey?: string } },
+  sourcePageKey: string | undefined
+) {
+  if (!sourcePageKey) {
+    return true;
+  }
+  const sourceNamespace = sourceNamespaceFromPageKey(sourcePageKey);
+  if (!sourceNamespace) {
+    return true;
+  }
+  const parentNamespace = sourceNamespaceFromPageKey(concept.profile?.parentPageKey);
+  if (parentNamespace === sourceNamespace) {
+    return true;
+  }
+  if (normalizePageKey(concept.profile?.parentPageKey ?? "") === normalizePageKey(sourcePageKey)) {
+    return true;
+  }
+  return concept.conceptKey === sourceNamespace || concept.conceptKey.startsWith(`${sourceNamespace}-`);
+}
+
+function sourceNamespaceFromPageKey(pageKey: string | undefined) {
+  if (!pageKey) {
+    return null;
+  }
+  const normalized = normalizePageKey(pageKey);
+  return normalized.split(".").filter(Boolean)[0] ?? null;
+}
+
+function isQueueableDecision(decision: ConceptPageDecision): decision is ConceptPageDecision & { disposition: "CREATE_PAGE" | "UPDATE_PAGE" | "ATTACH_TO_PAGE" } {
+  return decision.disposition === "CREATE_PAGE" || decision.disposition === "UPDATE_PAGE" || decision.disposition === "ATTACH_TO_PAGE";
+}
+
+function debugConceptDecision(payloadJson: Record<string, unknown>) {
+  const decision = payloadJson.relatedConcept;
+  if (!decision || typeof decision !== "object") return null;
+  const item = decision as ConceptPageDecision;
+  return {
+    decision: item.disposition,
+    score: item.score,
+    parent: item.attachToPageKey ?? item.parentPageKey ?? null,
+    reason: item.reason,
+    evidenceCount: item.evidenceIds.length
+  };
 }
 
 function isCodeMapNode(value: unknown): value is CodeMapNode {

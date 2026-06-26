@@ -3,9 +3,9 @@ import { generationDebugEvents, getDb } from "@code2wiki/db";
 type Severity = "INFO" | "WARN" | "ERROR";
 
 const REDACTED_KEY = /(prompt|body|provider|raw|secret|token|auth|header|cookie|password|apikey|api_key)/i;
-const MAX_DEPTH = 4;
+const MAX_DEPTH = 5;
 const MAX_STRING = 300;
-const MAX_ARRAY = 20;
+const MAX_ARRAY = 200;
 const MAX_KEYS = 40;
 
 export async function emitDebugEvent(input: {

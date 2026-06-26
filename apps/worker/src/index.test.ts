@@ -5,11 +5,15 @@ import { parseWorkerCliArgs, runWorkerCli } from "./index";
 const mocks = vi.hoisted(() => ({
   analyzeCode: vi.fn(),
   cloneRepository: vi.fn(),
+  deleteGenerationRun: vi.fn(),
+  runWorkerDaemon: vi.fn(),
   runSelfExpandingGeneration: vi.fn()
 }));
 
 vi.mock("./jobs/analyze-code", () => ({ analyzeCode: mocks.analyzeCode }));
 vi.mock("./jobs/clone-repository", () => ({ cloneRepository: mocks.cloneRepository }));
+vi.mock("./jobs/delete-generation-run", () => ({ deleteGenerationRun: mocks.deleteGenerationRun }));
+vi.mock("./daemon", () => ({ runWorkerDaemon: mocks.runWorkerDaemon }));
 vi.mock("./jobs/self-expanding-generation/task-queue", () => ({ runSelfExpandingGeneration: mocks.runSelfExpandingGeneration }));
 
 describe("parseWorkerCliArgs", () => {
@@ -30,12 +34,15 @@ describe("parseWorkerCliArgs", () => {
     expect(parseWorkerCliArgs(["--", "clone", "run_123"])).toEqual({ ok: true, command: "clone", generationRunId: "run_123" });
     expect(parseWorkerCliArgs(["analyze"])).toEqual({ ok: true, command: "analyze", generationRunId: undefined });
     expect(parseWorkerCliArgs(["generate", "run_123"])).toEqual({ ok: true, command: "generate", generationRunId: "run_123" });
+    expect(parseWorkerCliArgs(["delete-generation", "run_123"])).toEqual({ ok: true, command: "delete-generation", generationRunId: "run_123" });
+    expect(parseWorkerCliArgs(["daemon"])).toEqual({ ok: true, command: "daemon" });
+    expect(parseWorkerCliArgs(["daemon", "1000"])).toEqual({ ok: true, command: "daemon", pollIntervalMs: 1000 });
   });
 
   it("rejects extra args after a step", () => {
     expect(parseWorkerCliArgs(["clone", "run_123", "extra"])).toEqual({
       ok: false,
-      error: "Usage: pnpm worker:run -- [clone|analyze|generate] [generationRunId]"
+      error: "Usage: pnpm worker:run -- [clone|analyze|generate|delete-generation] [generationRunId]"
     });
   });
 
@@ -54,5 +61,25 @@ describe("parseWorkerCliArgs", () => {
       result: { status: "tasks_processed", generationRunId: "run_123" }
     });
     expect(mocks.runSelfExpandingGeneration).toHaveBeenCalledWith("run_123");
+  });
+
+  it("dispatches delete-generation to the cleanup job", async () => {
+    mocks.deleteGenerationRun.mockResolvedValue({ status: "deleted", generationRunId: "run_123" });
+
+    await expect(runWorkerCli(["delete-generation", "run_123"])).resolves.toEqual({
+      command: "delete-generation",
+      result: { status: "deleted", generationRunId: "run_123" }
+    });
+    expect(mocks.deleteGenerationRun).toHaveBeenCalledWith("run_123");
+  });
+
+  it("dispatches daemon mode to the background loop", async () => {
+    mocks.runWorkerDaemon.mockResolvedValue(undefined);
+
+    await expect(runWorkerCli(["daemon", "2500"])).resolves.toEqual({
+      command: "daemon",
+      status: "running"
+    });
+    expect(mocks.runWorkerDaemon).toHaveBeenCalledWith({ pollIntervalMs: 2500 });
   });
 });

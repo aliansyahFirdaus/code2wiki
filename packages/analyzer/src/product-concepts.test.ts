@@ -76,6 +76,84 @@ describe("product concepts", () => {
       sourceNodeKeys: ["cutoff", "form"]
     });
   });
+
+  it("profiles fields, filters, loading, and empty states as parent-page details", () => {
+    const result = deriveProductConcepts({
+      facts: [
+        fact("filter", "BUTTON_ACTION", "Button action Filter Payroll", ["ev-filter"]),
+        fact("loading", "UI_STATE", "UI state Loading payroll results", ["ev-loading"]),
+        fact("empty", "UI_STATE", "UI state No payroll results", ["ev-empty"])
+      ],
+      evidence: [
+        evidence("ev-filter", "app/payroll/page.tsx", "ACTION", "<Button>Filter Payroll</Button>"),
+        evidence("ev-loading", "app/payroll/page.tsx", "OTHER", "Loading payroll results"),
+        evidence("ev-empty", "app/payroll/page.tsx", "OTHER", "No payroll results")
+      ],
+      codeMap: codeMap([node("field-status", "FORM_FIELD", "status", "app/payroll/page.tsx", ["ev-filter"], { fieldName: "status" })])
+    });
+
+    expect(result.find((item) => item.conceptKey === "filter-payroll")).toMatchObject({
+      profile: expect.objectContaining({ roles: expect.arrayContaining(["action", "field"]), score: 2 })
+    });
+    expect(result.find((item) => item.conceptKey === "loading-payroll-result")).toMatchObject({
+      profile: expect.objectContaining({ roles: expect.arrayContaining(["async"]) })
+    });
+    expect(result.find((item) => item.conceptKey === "payroll-result")).toMatchObject({
+      profile: expect.objectContaining({ roles: expect.arrayContaining(["empty_state"]) })
+    });
+  });
+
+  it("profiles async mutation concepts as page candidates", () => {
+    const result = deriveProductConcepts({
+      facts: [
+        fact("action-recalculate", "BUTTON_ACTION", "Button action Open Recalculate Payroll modal", ["ev-action"]),
+        fact("api-recalculate", "API_CALL", "API call fetch('/api/payroll/recalculate', { method: 'POST' })", ["ev-api"])
+      ],
+      evidence: [
+        evidence("ev-action", "app/payroll/page.tsx", "ACTION", "<Button>Open Recalculate Payroll</Button>"),
+        evidence("ev-api", "app/payroll/page.tsx", "API_CALL", "fetch('/api/payroll/recalculate', { method: 'POST' })")
+      ],
+      codeMap: codeMap([
+        node("api-recalculate", "FRONTEND_API_CALL", "POST /api/payroll/recalculate", "app/payroll/page.tsx", ["ev-api"], { path: "/api/payroll/recalculate", method: "POST" })
+      ])
+    });
+
+    expect(result.find((item) => item.conceptKey === "payroll-recalculate")).toMatchObject({
+      profile: expect.objectContaining({ roles: expect.arrayContaining(["async", "mutation"]), score: 4 })
+    });
+  });
+
+  it("profiles validation-heavy merge data as a page candidate", () => {
+    const result = deriveProductConcepts({
+      facts: [
+        fact("action-merge", "BUTTON_ACTION", "Button action Merge Data", ["ev-action"]),
+        fact("validation-merge", "VALIDATION_RULE", "Validation rule Merge Data requires selected source and target records", ["ev-validation"])
+      ],
+      evidence: [
+        evidence("ev-action", "app/tools/merge/page.tsx", "ACTION", "<Button>Merge Data</Button>"),
+        evidence("ev-validation", "app/tools/merge/page.tsx", "VALIDATION", "Merge Data requires selected source and target records")
+      ],
+      codeMap: codeMap([])
+    });
+
+    const concept = result.find((item) => item.conceptKey === "merge-data");
+    expect(concept).toMatchObject({
+      profile: expect.objectContaining({ roles: expect.arrayContaining(["action", "async", "mutation", "validation"]) })
+    });
+    expect(concept?.profile.score).toBeGreaterThanOrEqual(4);
+  });
+
+  it("marks schema-only concepts as technical-only", () => {
+    const result = deriveProductConcepts({
+      facts: [],
+      evidence: [evidence("ev-schema", "server/schema.ts", "OTHER", "repositoryId uuid")],
+      codeMap: codeMap([node("schema-repo", "SCHEMA_ENTITY", "Database entity repositories", "server/schema.ts", ["ev-schema"])])
+    });
+
+    expect(result.find((item) => item.conceptKey === "repository")).toMatchObject({
+      profile: expect.objectContaining({ technicalOnly: true })
+    });
+  });
 });
 
 function keys(items: ReturnType<typeof deriveProductConcepts>) {

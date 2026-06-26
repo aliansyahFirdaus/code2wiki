@@ -160,31 +160,35 @@ EXCLUDED_NO_WIKI_VALUE
 
 Uncovered evidence should never disappear silently.
 
-## Keyword Filter Warning
+## Seed/Root Scope Warning
 
-`CODE2WIKI_SCAN_KEYWORDS` is useful for narrow debugging, but it is unsafe for full recursive discovery.
+Scoped scans must use deterministic seed/root paths, not keyword filters.
 
-Example:
+Examples:
 
 ```text
-CODE2WIKI_SCAN_KEYWORDS=insurance
+CODE2WIKI_FRONTEND_SCAN_ROOTS=src/app/(home)/payroll
+CODE2WIKI_BACKEND_SCAN_ROOTS=internal/handler/gin/route,internal/handler/gin/payroll
+CODE2WIKI_FRONTEND_SCAN_MAX_FILES=40
+CODE2WIKI_BACKEND_SCAN_MAX_FILES=20
 ```
 
-With that env set, the scanner only includes files whose path or content contains `insurance`. Payroll, contract, vessel, crew, export, or salary-component files may be excluded before evidence extraction.
+With those env vars set, the scanner only includes files under the allowed roots. Product expansion may still happen later, but every expansion must be justified by a parent file and a concrete relation such as navigation, import, or matched endpoint.
 
 Important consequence:
 
 ```text
-Files excluded by CODE2WIKI_SCAN_KEYWORDS cannot become uncovered evidence,
+Files outside the active scan roots cannot become uncovered evidence,
 because the system never saw them.
 ```
 
-For full wiki generation, do not set `CODE2WIKI_SCAN_KEYWORDS`.
+For full wiki generation, leave scan roots and max file caps unset.
 
-For scoped debugging, keep it allowed but surface a warning:
+For scoped debugging, surface a warning:
 
 ```text
-SCAN_KEYWORDS_ACTIVE: generation is scoped and coverage is not full-repository coverage.
+SCAN_ROOTS_ACTIVE: generation is scoped and coverage is not full-repository coverage.
+SCAN_MAX_FILES_ACTIVE: generation is capped and coverage is not full-repository coverage.
 ```
 
 ## Proposed Implementation
@@ -318,7 +322,7 @@ Risk: scoped scan looks complete.
 Guard:
 
 ```text
-Warn loudly when CODE2WIKI_SCAN_KEYWORDS is active.
+Warn loudly when scan roots or max file caps are active.
 Do not present scoped coverage as full-repository coverage.
 ```
 
@@ -339,7 +343,7 @@ Worker tests:
 - depth 2 stops expansion;
 - duplicate concept/page tasks are deduped;
 - backend-only unanchored concepts become `NEEDS_REVIEW`;
-- scoped scan emits a visible warning when `CODE2WIKI_SCAN_KEYWORDS` is active.
+- scoped scan emits a visible warning when scan roots or max file caps are active.
 
 Quality tests:
 
@@ -356,6 +360,6 @@ discoveryMode = deterministic-first
 maxDepth = 2
 AI traversal = disabled
 AI writing = enabled, evidence-only
-keywordFilterInFullRun = disabled / warning-only if active
+scanRootScope = optional, warning when active
 coverageInvariant = every meaningful evidence reaches a terminal coverage state
 ```

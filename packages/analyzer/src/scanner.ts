@@ -46,14 +46,24 @@ const meaningfulStateNames = /(loading|error|success|empty|modal|open|disabled)/
 export type ScanCodeInput = {
   repositoryRole: RepositoryRole;
   repositoryRoot: string;
-  keywordFilter?: string[];
+  includePaths?: string[];
+  maxFiles?: number;
+  shouldStop?: () => boolean | Promise<boolean>;
 };
 
 export type ScanCodeResult = {
   totalEligibleFiles: number;
   indexedEligibleFiles: number;
+  eligibleFiles: string[];
+  indexedFiles: string[];
+  ignoredFiles: ScanFileDecision[];
   evidence: ScannerEvidence[];
   facts: ScannerFact[];
+};
+
+export type ScanFileDecision = {
+  filePath: string;
+  reason: string;
 };
 
 type MutableEvidence = Omit<ScannerEvidence, "evidenceKey">;
@@ -64,26 +74,38 @@ type FileScanContext = {
 };
 
 export async function scanCode(input: ScanCodeInput): Promise<ScanCodeResult> {
-  const candidateFiles = await collectCandidateFiles(input.repositoryRoot);
-  const keywordFilter = normalizeKeywordFilter(input.keywordFilter);
+  const includePaths = normalizeIncludePaths(input.includePaths);
+  const { candidateFiles, ignoredFiles } = await collectCandidateFiles(input.repositoryRoot, includePaths);
+  const maxFiles = normalizeMaxFiles(input.maxFiles);
   const evidenceByKey = new Map<string, ScannerEvidence>();
   const factsByKey = new Map<string, ScannerFact>();
+  const eligibleFiles: string[] = [];
+  const indexedFiles: string[] = [];
   let totalEligibleFiles = 0;
   let indexedEligibleFiles = 0;
 
   for (const filePath of candidateFiles) {
+    if (await input.shouldStop?.()) {
+      throw new Error("SCAN_STOP_REQUESTED");
+    }
     const absolutePath = path.join(input.repositoryRoot, ...filePath.split("/"));
     const content = await readFile(absolutePath, "utf8");
 
-    if (isBinaryContent(content) || hasGeneratedHeader(content)) {
+    if (isBinaryContent(content)) {
+      ignoredFiles.push({ filePath, reason: "binary content" });
       continue;
     }
-
-    if (keywordFilter.length > 0 && !matchesKeywordFilter(filePath, content, keywordFilter)) {
+    if (hasGeneratedHeader(content)) {
+      ignoredFiles.push({ filePath, reason: "generated header" });
       continue;
     }
 
     totalEligibleFiles += 1;
+    eligibleFiles.push(filePath);
+    if (maxFiles !== undefined && indexedEligibleFiles >= maxFiles) {
+      ignoredFiles.push({ filePath, reason: "max files cap" });
+      continue;
+    }
 
     const context: FileScanContext = {
       repositoryRole: input.repositoryRole,
@@ -102,6 +124,7 @@ export async function scanCode(input: ScanCodeInput): Promise<ScanCodeResult> {
     }
 
     indexedEligibleFiles += 1;
+    indexedFiles.push(filePath);
   }
 
   const evidence = [...evidenceByKey.values()].sort(compareEvidence);
@@ -113,22 +136,37 @@ export async function scanCode(input: ScanCodeInput): Promise<ScanCodeResult> {
   return {
     totalEligibleFiles,
     indexedEligibleFiles,
+    eligibleFiles,
+    indexedFiles,
+    ignoredFiles: ignoredFiles.sort(compareFileDecision),
     evidence,
     facts
   };
 }
 
-function normalizeKeywordFilter(keywords?: string[]) {
-  return [...new Set((keywords ?? []).map((keyword) => keyword.trim().toLowerCase()).filter(Boolean))];
+function normalizeIncludePaths(paths?: string[]) {
+  return [
+    ...new Set(
+      (paths ?? [])
+        .map((item) => item.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, ""))
+        .filter(Boolean)
+    )
+  ];
 }
 
-function matchesKeywordFilter(filePath: string, content: string, keywords: string[]) {
-  const haystack = `${filePath}\n${content}`.toLowerCase();
-  return keywords.some((keyword) => haystack.includes(keyword));
+function normalizeMaxFiles(maxFiles?: number) {
+  if (maxFiles === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(maxFiles) || maxFiles < 0) {
+    return undefined;
+  }
+  return Math.floor(maxFiles);
 }
 
-async function collectCandidateFiles(root: string) {
-  const files: string[] = [];
+async function collectCandidateFiles(root: string, includePaths: string[] = []) {
+  const candidateFiles: string[] = [];
+  const ignoredFiles: ScanFileDecision[] = [];
   const ignoredByFile = await readCode2WikiIgnore(root);
 
   async function walk(relativeDirectory: string) {
@@ -139,20 +177,44 @@ async function collectCandidateFiles(root: string) {
       const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
 
       if (entry.isDirectory()) {
-        if (!ignoredDirectories.has(entry.name) && !isIgnoredByFile(`${relativePath}/`, ignoredByFile)) {
+        if (ignoredDirectories.has(entry.name)) {
+          ignoredFiles.push({ filePath: `${relativePath}/`, reason: "ignored directory" });
+        } else if (isIgnoredByFile(`${relativePath}/`, ignoredByFile)) {
+          ignoredFiles.push({ filePath: `${relativePath}/`, reason: ".code2wikiignore" });
+        } else {
           await walk(relativePath);
         }
         continue;
       }
 
-      if (entry.isFile() && isEligibleSourceFile(relativePath, ignoredByFile) && (await stat(path.join(root, ...relativePath.split("/")))).size <= maxFileBytes) {
-        files.push(relativePath);
+      if (!entry.isFile()) {
+        continue;
       }
+
+      const ignoreReason = fileIgnoreReason(relativePath, ignoredByFile, includePaths);
+      if (ignoreReason) {
+        ignoredFiles.push({ filePath: relativePath, reason: ignoreReason });
+        continue;
+      }
+
+      if ((await stat(path.join(root, ...relativePath.split("/")))).size > maxFileBytes) {
+        ignoredFiles.push({ filePath: relativePath, reason: "file too large" });
+        continue;
+      }
+
+      candidateFiles.push(relativePath);
     }
   }
 
   await walk("");
-  return files.sort();
+  return { candidateFiles: candidateFiles.sort(), ignoredFiles };
+}
+
+function isIncludedByScope(filePath: string, includePaths: string[]) {
+  if (includePaths.length === 0) {
+    return true;
+  }
+  return includePaths.some((includePath) => filePath === includePath || filePath.startsWith(`${includePath}/`));
 }
 
 async function readCode2WikiIgnore(root: string) {
@@ -176,22 +238,30 @@ async function readCode2WikiIgnore(root: string) {
 }
 
 function isEligibleSourceFile(filePath: string, ignoredByFile: string[]) {
+  return !fileIgnoreReason(filePath, ignoredByFile, []);
+}
+
+function fileIgnoreReason(filePath: string, ignoredByFile: string[], includePaths: string[]) {
   const basename = path.posix.basename(filePath);
   const extension = path.posix.extname(filePath);
 
+  if (!isIncludedByScope(filePath, includePaths)) {
+    return "outside scan roots";
+  }
+
   if (isIgnoredByFile(filePath, ignoredByFile)) {
-    return false;
+    return ".code2wikiignore";
   }
 
   if (ignoredExtensions.has(extension.toLowerCase())) {
-    return false;
+    return "ignored extension";
   }
 
   if (basename.startsWith(".") || lockFiles.has(basename) || basename.endsWith(".d.ts") || basename.endsWith(".min.js")) {
-    return false;
+    return "ignored filename";
   }
 
-  return !/(^|[.-])generated\./i.test(basename);
+  return /(^|[.-])generated\./i.test(basename) ? "generated filename" : null;
 }
 
 function isIgnoredByFile(filePath: string, patterns: string[]) {
@@ -516,4 +586,8 @@ function compareEvidence(left: ScannerEvidence, right: ScannerEvidence) {
 
 function compareFacts(left: ScannerFact, right: ScannerFact) {
   return left.factKind.localeCompare(right.factKind) || left.text.localeCompare(right.text) || left.factKey.localeCompare(right.factKey);
+}
+
+function compareFileDecision(left: ScanFileDecision, right: ScanFileDecision) {
+  return left.filePath.localeCompare(right.filePath) || left.reason.localeCompare(right.reason);
 }

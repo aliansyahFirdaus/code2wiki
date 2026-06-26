@@ -15,6 +15,9 @@ describe("toGenerationRunResponse", () => {
         backendTag: "be-v1",
         backendCommitSha: "be-sha",
         status: "COMPLETED",
+        executionMode: "AUTO",
+        controlState: "ACTIVE",
+        advanceRequestedAt: null,
         totalEligibleFiles: 30,
         indexedEligibleFiles: 27,
         frontendTotalEligibleFiles: 10,
@@ -53,6 +56,9 @@ describe("toGenerationRunResponse", () => {
         backendTag: "be-v1",
         backendCommitSha: "be-sha",
         status: "COMPLETED",
+        executionMode: "MANUAL",
+        controlState: "ACTIVE",
+        advanceRequestedAt: new Date("2026-01-02T00:00:00Z"),
         totalEligibleFiles: 0,
         indexedEligibleFiles: 0,
         frontendTotalEligibleFiles: 0,
@@ -72,6 +78,8 @@ describe("toGenerationRunResponse", () => {
         aiUsageJson: {
           calls: [{ raw: "hidden" }],
           summary: {
+            provider: "nvidia",
+            model: "meta/llama-3.1-8b-instruct",
             callCount: 1,
             promptTokens: 10,
             completionTokens: 5,
@@ -107,7 +115,13 @@ describe("toGenerationRunResponse", () => {
 
     expect(response.qualityGateResult).toBe("WARN");
     expect(response.qualityIssueCounts).toEqual({ error: 1, warn: 1 });
+    expect(response.qualityIssues).toEqual([
+      { severity: "WARN", code: "LOW_STATEMENT_COUNT", message: "Low statement count." },
+      { severity: "ERROR", code: "EMPTY_PAGE", message: "Empty page." }
+    ]);
     expect(response.aiUsageSummary).toEqual({
+      provider: "nvidia",
+      model: "meta/llama-3.1-8b-instruct",
       callCount: 1,
       promptTokens: 10,
       completionTokens: 5,
@@ -130,6 +144,9 @@ describe("toGenerationRunResponse", () => {
       counts: { facts: 1, evidence: 2, positiveCoverage: 1, terminalNegativeCoverage: 0, uncovered: 1, queuedTasks: 0, reviewGaps: 1 },
       gaps: [{ disposition: "NEEDS_REVIEW", pageKey: "users", evidenceId: "ev-1", factId: "fact-1", reason: "NO_FRONTEND_ANCHOR" }]
     });
+    expect(response.executionMode).toBe("MANUAL");
+    expect(response.controlState).toBe("ACTIVE");
+    expect(response.advanceRequestedAt).toBe("2026-01-02T00:00:00.000Z");
     expect(response).not.toHaveProperty("qualityReportJson");
     expect(response).not.toHaveProperty("aiUsageJson");
     expect(response).not.toHaveProperty("incrementalReportJson");

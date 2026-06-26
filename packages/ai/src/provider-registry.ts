@@ -1,4 +1,4 @@
-import { OpenRouterProvider, OPENROUTER_DEFAULT_MODEL } from "./openrouter-provider";
+import { OpenRouterProvider } from "./openrouter-provider";
 import {
   ProviderConfigurationError,
   type AIProvider,
@@ -9,10 +9,10 @@ import {
 
 type ProviderEnv = Record<string, string | undefined>;
 
-const supportedProviders = ["openrouter"] as const satisfies readonly SupportedAIProvider[];
+const supportedProviders = ["openrouter", "nvidia"] as const satisfies readonly SupportedAIProvider[];
 
 export function resolveAIProviderConfig(env: ProviderEnv = process.env): AIProviderConfig {
-  const provider = (env.AI_PROVIDER ?? "openrouter").trim().toLowerCase();
+  const provider = resolveProvider(env);
 
   if (!isSupportedProvider(provider)) {
     throw new ProviderConfigurationError(
@@ -22,14 +22,15 @@ export function resolveAIProviderConfig(env: ProviderEnv = process.env): AIProvi
 
   return {
     provider,
-    model: env.OPENROUTER_MODEL ?? env.AI_MODEL ?? OPENROUTER_DEFAULT_MODEL,
-    apiKey: env.OPENROUTER_API_KEY,
-    baseUrl: env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1"
+    model: requiredString(env.AI_MODEL, "AI_MODEL"),
+    apiKey: requiredString(env.AI_API_KEY, "AI_API_KEY"),
+    baseUrl: requiredString(env.AI_BASE_URL, "AI_BASE_URL"),
+    maxRequestsPerMinute: positiveNumberOrUndefined(env.AI_MAX_REQUESTS_PER_MINUTE)
   };
 }
 
 export function createAIProvider(config: AIProviderConfig): AIProvider {
-  if (config.provider === "openrouter") {
+  if (config.provider === "openrouter" || config.provider === "nvidia") {
     return new OpenRouterProvider(config);
   }
 
@@ -49,16 +50,24 @@ export function getProviderCapabilities(providerOrConfig: AIProvider | AIProvide
     return providerOrConfig.capabilities;
   }
 
-  if (isProviderConfig(providerOrConfig) && providerOrConfig.provider === "openrouter") {
-    return openRouterCapabilities(providerOrConfig.model);
+  if (isProviderConfig(providerOrConfig) && (providerOrConfig.provider === "openrouter" || providerOrConfig.provider === "nvidia")) {
+    return openAiCompatibleCapabilities(providerOrConfig.provider, providerOrConfig.model);
   }
 
   throw new ProviderConfigurationError(`Unsupported AI_PROVIDER. Supported providers: ${supportedProviders.join(", ")}.`);
 }
 
 export function openRouterCapabilities(model: string): AIProviderCapabilities {
+  return openAiCompatibleCapabilities("openrouter", model);
+}
+
+export function nvidiaCapabilities(model: string): AIProviderCapabilities {
+  return openAiCompatibleCapabilities("nvidia", model);
+}
+
+function openAiCompatibleCapabilities(provider: SupportedAIProvider, model: string): AIProviderCapabilities {
   return {
-    provider: "openrouter",
+    provider,
     model,
     supportsStrictJsonSchema: true,
     supportsUsage: true,
@@ -66,6 +75,19 @@ export function openRouterCapabilities(model: string): AIProviderCapabilities {
     usageSource: "provider",
     structuredOutputMode: "json_schema"
   };
+}
+
+function resolveProvider(env: ProviderEnv): SupportedAIProvider {
+  const explicit = env.AI_PROVIDER?.trim().toLowerCase();
+  if (explicit) {
+    return explicit as SupportedAIProvider;
+  }
+
+  const baseUrl = env.AI_BASE_URL;
+  if (typeof baseUrl === "string" && /integrate\.api\.nvidia\.com/i.test(baseUrl)) {
+    return "nvidia";
+  }
+  return "openrouter";
 }
 
 function isSupportedProvider(value: string): value is SupportedAIProvider {
@@ -84,4 +106,19 @@ function safeProviderName(value: string) {
     return "[redacted-provider]";
   }
   return value.slice(0, 64);
+}
+
+function positiveNumberOrUndefined(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function requiredString(value: string | undefined, envName: "AI_MODEL" | "AI_API_KEY" | "AI_BASE_URL") {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  throw new ProviderConfigurationError(`${envName} is required.`);
 }
